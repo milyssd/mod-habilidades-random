@@ -43,8 +43,51 @@ static void CheckTransport(std::string const& host, std::string const& port, std
     assert(Same(source, original));
 }
 
+static void CheckTransaction(std::string const& failure, std::vector<std::string> const& expected, bool success)
+{
+    HRTransaction transaction;
+    transaction.Append("first module write");
+    transaction.Append("second module write");
+    std::vector<std::string> executed;
+    bool committed = HRExecuteCheckedTransaction(transaction, [&](std::string const& sql)
+    {
+        executed.push_back(sql);
+        return sql != failure;
+    });
+    assert(committed == success);
+    assert(executed == expected);
+}
+
 int main()
 {
+    HRTransaction empty;
+    unsigned calls = 0;
+    assert(!HRExecuteCheckedTransaction(empty, [&](auto const&) { ++calls; return true; }));
+    assert(calls == 0);
+    CheckTransaction("", {"START TRANSACTION", "first module write", "second module write", "COMMIT"}, true);
+    CheckTransaction("START TRANSACTION", {"START TRANSACTION"}, false);
+    CheckTransaction("first module write", {"START TRANSACTION", "first module write", "ROLLBACK"}, false);
+    CheckTransaction("second module write", {"START TRANSACTION", "first module write", "second module write", "ROLLBACK"}, false);
+    CheckTransaction("COMMIT", {"START TRANSACTION", "first module write", "second module write", "COMMIT", "ROLLBACK"}, false);
+
+    ConnectionInfo transport{"127.0.0.1", "3306", "account", "", "event", "ssl", "extra"};
+    assert(HRValidPrivateDatabaseTransport(transport));
+    for (auto invalid : {"", "-1", "65536", "4294967296", "3306abc", "/tmp/mysql.sock", " 3306"})
+    {
+        transport.port_or_socket = invalid;
+        assert(!HRValidPrivateDatabaseTransport(transport));
+    }
+    for (auto valid : {"0", "1", "65535", "0003306"})
+    {
+        transport.port_or_socket = valid;
+        assert(HRValidPrivateDatabaseTransport(transport));
+    }
+    transport.host = ".";
+    transport.port_or_socket = "/tmp/mysql.sock";
+    assert(HRValidPrivateDatabaseTransport(transport));
+    transport.user.clear();
+    assert(!HRValidPrivateDatabaseTransport(transport));
+
     assert(!HRCopyPrivateDatabaseConnection(static_cast<ConnectionInfo const*>(nullptr), "event"));
     CheckTransport("127.0.0.1", "3306", "127.0.0.1");
     CheckTransport("localhost", "3306", "localhost");

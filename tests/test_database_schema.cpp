@@ -22,5 +22,7 @@ int main()
     assert(ids.size() == 474);
     assert(std::size(HRSchema::Statements) == 10);
     assert(HRSchema::Version == 2);
+    for (auto statement : HRSchema::Statements)
+        assert(statement.find("ENGINE=InnoDB") != std::string_view::npos);
     std::cout << "PASS: private schema isolation, identifier validation, skill snapshot schema and 474 unique pool entries\n";
 }

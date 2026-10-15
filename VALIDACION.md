@@ -1,43 +1,45 @@
-# Validación — Hollowsource y recuperación del personaje
+# Validación de 2.2.0-dev
 
-Referencia: AzerothCore `9eabf314a27b71d4e9cd513f6f2c08befe90d4ef` con el parche incluido.
+Destino: carpeta `src/server` del `server.zip` recibido del usuario, atribuida por él a `yafeth950-test/hollowsource` `3927b32566d2910b332decb4fa97e3a2e0879b40`. El ZIP no permite verificar ese hash Git. Para las comprobaciones C++ se emplean sus encabezados reales y `src/common`/dependencias de AzerothCore `9eabf314a27b71d4e9cd513f6f2c08befe90d4ef`, porque esas carpetas no estaban incluidas.
 
-Destino: archivos `src/server` del `server.zip` enviado por el usuario, atribuidos por él a `yafeth950-test/hollowsource` `3927b32566d2910b332decb4fa97e3a2e0879b40`. Se inspeccionaron esas fuentes; el ZIP no permite verificar el hash Git. No contiene `src/common` ni `deps`: se usan los del core de referencia como apoyo a las comprobaciones C++.
+## Correcciones revisadas
 
-Compatibilidad corregida después de la captura C3668:
+- Configuración en español organizada por evento, NPC, elecciones, cambios/bloqueos, rarezas y base propia. Se conservan las claves anteriores y la conexión automática sin repetir credenciales.
+- Restauración de talentos usando las máscaras reales de ambas especializaciones, en lugar de `HasTalent`, que ignora el argumento de especialización en el fork.
+- Guardados del evento y del personaje con START, operaciones y COMMIT comprobados. No se reconecta para repetir una consulta dentro de una transacción. La conexión de personajes ejecuta el guardado generado por las API y las sentencias preparadas del core; no instala SQL ni tablas del módulo en sus bases.
+- Resultado de escritura incierto: se bloquean nuevas acciones y se cierra la sesión. La reconexión recupera la copia durable y el journal pendiente, sin sobrescribirlos desde un estado local anterior.
+- El parche `player-save-guard` suspende los guardados completo, de inventario y de oro antes del cierre de una sesión incierta. Evita combinar oro nuevo con un inventario cuyo guardado falló; la marca no se persiste y el siguiente Player comienza sin ella.
+- Copia de destrezas, máximo y paso; reconstrucción completa de su proyección al guardar. No se retrocede el progreso de profesiones compartidas. Migración aditiva v1→v2 sin inventar destrezas históricas.
+- Base privada creada solo cuando no existe. Tablas meta/NPC con InnoDB y conversión de las versiones anteriores que heredaban otro motor. Se rechazan versiones futuras antes de modificar el esquema.
+- Ofertas completas y únicas antes de gastar saldos; premios por niveles sin repetir niveles anteriores ni desbordar contadores; pesos relativos sin truncar rarezas pequeñas. Peso cero excluye una categoría incluso al revalidar ofertas después de recargar configuración.
+- Exclusión de efectos incompatibles con el druida temporal, como domar bestias o activar runas. Las llamadas a mascotas exigen una mascota guardada apropiada.
+- NPC identificado por mapa y GUID, inserción y obtención de ID bajo la misma transacción y mutex, conservación de posiciones y manejo de fallos de borrado/creación. Se respetan perfiles druidas personalizados que ya existieran en el core.
+- Solicitudes directas a entrenadores de clase bloqueadas antes del cobro, además del menú. Se conservan entrenadores de profesiones.
+- Addon: solicitudes y temporizadores invalidados correctamente, actualización de rarezas, bloqueos fragmentados, validación de mensajes y remitente, cartas sin zonas de clic superpuestas y textos en español.
+- Recopilador de API: lista fija de fuentes, sin seguir enlaces simbólicos de archivos o directorios hacia otros contenidos, y sin sobrescribir ZIP existentes.
 
-- Se reprodujeron exactamente los cinco errores retirando esos cinco métodos de los encabezados de referencia, sin cambiar las demás API. Es una simulación de la superficie de hooks ausentes, no un checkout del core del usuario.
-- Se comprueba el módulo completo contra los encabezados normales y contra esa superficie reducida.
-- Un test C++17 ejecuta el despacho virtual real del adaptador para una API anterior, una API reciente y una firma diferente. Verifica que las llamadas llegan al bloqueo correcto.
-- Se contrastaron además todos los overrides y las API de Player, mapas y base de datos con los archivos reales recibidos. El fork usa la ruta histórica `OnPlayerLearnSpell`.
+## Comprobaciones
 
-Comprobaciones realizadas:
+- C++17 con `-Wall -Wextra -Werror`: reglas de cartas/premios/pesos; esquema y nombres privados; copia de conexión, puertos, socket, SSL y autenticación; fallos de START, escrituras y COMMIT sin reintento parcial.
+- Regresión de restauración de talentos con una API doble que reproduce `HasTalent` ignorando la especialización; especializaciones compartidas/inactivas y fallos de restauración. No sustituye ejecutar `Player` real.
+- Runtime de producción compilado con dobles de mapas/base/core: reproduce el mismo GUID en mapas distintos y verifica borrado correcto, errores de DB/spawn, perfiles y recuperación de posiciones.
+- Lua 5.1: sintaxis y ejecución del addon real con dobles de API WoW; mensajes, saldos, remitentes, respuestas parciales, temporizadores, cierre y reapertura. XML parseado y geometría comparada con el área visible de la textura; no es renderizado dentro de WoW.
+- MariaDB 11.8.6 desechable: DDL extraído del encabezado real, creación/reinicio, pool de 474 IDs sin reemplazar ajustes, copias de especializaciones/glifos/destrezas, migración, motores transaccionales, rollback, journal y posiciones NPC. Estas pruebas no ejecutan el guardado completo de un personaje del juego.
+- Helper de preparación: aplicación de ambas variantes, modo de comprobación, repetición sin cambios, firma/aplicación parcial, rutas con espacios y errores de Git/core. Parche específico comprobado sobre copias de los ObjectMgr completos del ZIP.
+- Actualización de un core con el parche runtime anterior: el helper añade la protección de guardado faltante y comprueba todos los parches antes de aplicar alguno. Sus guardas extraídas del parche se compilan y ejecutan con dobles de oro/inventario y rollback.
+- Recuperación: se compila el cuerpo real de `RequireRecovery` con dobles de Player/sesión. La regresión reproduce el fallo de oro sin objeto cuando no se activa la protección, y comprueba rollback, confirmación perdida y bloqueo antes de cerrar. Estas pruebas no ejecutan el proceso de logout del servidor completo.
+- Recopilador: exclusión de configuración/enlaces y protección de archivos existentes.
+- Aislamiento: no hay directorios de importación SQL ni consultas raw del módulo a los pools CharacterDatabase/WorldDatabase. Los únicos cambios de personaje se realizan mediante las API habituales del core.
 
-- Unidades C++ del módulo: `g++ -std=gnu++20 -fsyntax-only -Wall -Wextra -Werror=return-type` con encabezados reales del core y dependencias.
-- Las cinco unidades C++ del módulo y `ObjectMgr.cpp` del ZIP con el parche específico se compilaron a archivos objeto mediante `g++ -std=gnu++20 -c -Wall -Wextra -Werror=return-type`. Se usaron sus encabezados reales, sin sustituir encabezados del servidor por los de referencia. Esto no enlaza ni ejecuta `worldserver`.
-- El parche específico se aplica a una copia intacta del ZIP y admite comprobación inversa. No se cambió el contenido original subido. La prueba de sus dos métodos con fixtures mínimos y ASan/UBSan no encontró errores ni fugas; es una comprobación aislada, no ejecución del core.
-- Preparación del core: 11 pruebas del helper con Git real, incluyendo ambas variantes, repetición sin cambios, modo `--check`, aplicación parcial, firma incompatible, rutas con espacios, ausencia de Git y fuentes incompatibles. También se aplicó y repitió sobre los dos archivos completos del ZIP. Una prueba adicional verifica que el recopilador de API no incluye configuración ni sobrescribe archivos.
-- Test compilado de reglas: ofertas ajenas, saldos, bans/rerolls sin reemplazos y límites de participación/restauración.
-- Test compilado del esquema embebido: diez tablas, versión 2 y 474 IDs únicos. Se comprueba el rechazo de nombres de bases del core/sistema e identificadores inválidos.
-- Lua 5.1.5: sintaxis y ejecución del addon real con dobles de la API WoW. Lista de bloqueos vacía, inscripción después de estado inactivo, recepción de cartas, selección, bloqueo, ocultar/abrir, remitentes ajenos y callbacks pendientes tras cerrar.
-- MariaDB 11.8.6, base desechable: se ejecutaron los DDL extraídos del encabezado C++ real; se comprobaron creación, primer sembrado, repetición sin reemplazar la pool, copias de ambas especializaciones y glifos, y rollback de un guardado fallido.
-- Destrezas: migración aditiva desde v1 sin reemplazar copias ni pool; valores, paso y máximo persistentes; copia vacía diferenciada de copia antigua; detección de filas ausentes y rollback conjunto de inscripción/hechizos/destrezas. Esto comprueba persistencia y no sustituye la reconexión de un personaje en el juego.
-- Se comprobaron en SQL las marcas persistentes de reconciliación: interrupción después del commit del evento, finalización pendiente con nivel 80, conservación de la copia y acuse final. Esto verifica el esquema/journal, no sustituye una prueba real del guardado de Player.
-- Posiciones NPC: persistencia en la base privada y conservación al repetir el arranque.
-- Comprobación de aislamiento: no quedan importaciones SQL para bases del core ni llamadas raw Query/Execute a CharacterDatabase/WorldDatabase en el módulo. El guardado del personaje usa las API y sentencias preparadas existentes de AzerothCore.
+Las seis unidades C++ del módulo, `ObjectMgr.cpp` y `PlayerStorage.cpp` del fork parcheado compilaron a archivos objeto sin diagnósticos con GCC20 y las dependencias de apoyo indicadas. No se enlazó ni ejecutó `worldserver`. La rama `_WIN32` de los helpers se comprueba mediante el preprocesador; esto no equivale a compilar con MSVC.
 
-Conexión automática: si `DatabaseInfo` está vacío, se copia la configuración activa de `CharacterDatabase` y se cambia solamente la base de destino a `DatabaseName` (predeterminada: `mod_habilidades_random`). No se reconstruye ni registra una cadena con credenciales. La conexión del core y sus bases no se modifican. El modo explícito anterior sigue disponible como opción.
+## Pendiente en el servidor de destino
 
-El test C++ de conexión comprueba copia independiente, autenticación, SSL, contraseña vacía, puertos, named pipe y el socket Unix que el core normaliza al abrir. Pasó en la rama nativa y con `_WIN32` definido para comprobar esa selección condicional; esto último no es una compilación MSVC. La conexión propia conserva su host de transporte al reabrirse, sin modificar el pool del core.
+- Compilar y enlazar el servidor completo en Visual Studio con sus dependencias exactas.
+- Probar la conexión automática y sus permisos con la cuenta MySQL real.
+- Validar en WoW 3.3.5a la inscripción, reconexión como druida, recursos, habilidades, talentos/glifos de ambas especializaciones y restauración al 80 para cada clase.
+- Comprobar en el cliente real el addon actualizado, sus cartas, clics y solicitudes; reemplazarlo junto al módulo.
+- Interrumpir conexiones/proceso durante guardados reales y comprobar recuperación de personajes y journal.
+- Validar requisitos de armas, formas, posturas, mascotas y la pool; medir latencia de las transacciones síncronas bajo carga.
 
-Cambios contrastados con el flujo real de Player en el fork: las destrezas se restauran después de reconstruir los hechizos, y `SendInitialSpells` sincroniza el libro al terminar. El cambio de clase actualiza también CharacterCache conservando hermandad, arena, correo y grupo. Estas rutas requieren comprobación final dentro del juego.
-
-Pendiente antes de producción:
-
-- Compilar y enlazar el servidor completo con MSVC y las dependencias exactas del destino. No se ejecutó Visual Studio en este entorno.
-- Probar apertura automática de la conexión y permisos con la cuenta MySQL real del core; debe poder crear y administrar la base del evento.
-- Probar en el juego `.hr npc`, interacción, persistencia del NPC tras reiniciar, conversión sin cambiar de raza y restauración de cada clase al 80, incluyendo destrezas tras reconectar y actualización del libro sin reconectar.
-- Interrumpir de verdad el proceso o una conexión entre el commit privado y el guardado del core; comprobar la reconciliación de personajes, talentos y glifos.
-- Validar poderes, requisitos de armas/formas/mascotas y rendimiento bajo carga.
-
-No se certifica todavía el funcionamiento integral dentro de WoW. Es una versión de desarrollo con verificaciones parciales y requisitos explícitos de integración.
+No se certifica el funcionamiento integral en WoW. Es una versión de desarrollo con verificaciones de código y componentes, pendiente de las pruebas del servidor y cliente reales.

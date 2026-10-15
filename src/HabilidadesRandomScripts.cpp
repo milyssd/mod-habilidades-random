@@ -1,4 +1,5 @@
 #include "HabilidadesRandom.h"
+#include "HRCharacterSave.h"
 #include "HRDatabase.h"
 #include "HRRuntime.h"
 #include "HRLearnSpellHook.h"
@@ -12,8 +13,26 @@
 #include "Creature.h"
 #include "Item.h"
 #include "Player.h"
+#include "ObjectMgr.h"
+#include "Opcodes.h"
+#include "ServerScript.h"
 #include "ScriptedGossip.h"
 #include "ScriptMgr.h"
+#include "Trainer.h"
+#include "WorldPacket.h"
+#include "WorldSession.h"
+
+namespace
+{
+bool IsClassTrainer(Creature const* creature)
+{
+    if (!creature)
+        return false;
+    Trainer::Trainer const* trainer = sObjectMgr->GetTrainer(creature->GetEntry());
+    return creature->HasNpcFlag(UNIT_NPC_FLAG_TRAINER_CLASS) ||
+        (trainer && trainer->GetTrainerType() == Trainer::Type::Class);
+}
+}
 
 class HRWorld : public WorldScript
 {
@@ -41,6 +60,7 @@ public:
     void OnAfterUnloadAllMaps() override
     {
         // Wait until player/map callbacks have stopped, then close our own connection.
+        HRCloseCharacterSave();
         HRDatabaseStore.Close();
     }
     void OnStartup() override
@@ -121,7 +141,7 @@ public:
     bool CanAccountCreateCharacter(uint32, uint8 race, uint8 classId) override
     {
         // Compatibility rows are for enrolled characters, not for creating permanent custom classes.
-        return classId != CLASS_DRUID || race == RACE_NIGHTELF || race == RACE_TAUREN;
+        return classId != CLASS_DRUID || !HRRuntime::IsEventOnlyDruidRace(race);
     }
 };
 
@@ -134,7 +154,7 @@ public:
     {
         if (!HRRuntime::IsNpc(creature))
         {
-            if (creature->HasNpcFlag(UNIT_NPC_FLAG_TRAINER_CLASS) && sHabilidadesRandomMgr->TrainersBlocked(player))
+            if (IsClassTrainer(creature) && sHabilidadesRandomMgr->TrainersBlocked(player))
             {
                 CloseGossipMenuFor(player);
                 ChatHandler(player->GetSession()).SendSysMessage("[Desafío] Los entrenadores de clase están bloqueados hasta completar el modo.");
@@ -176,6 +196,30 @@ public:
     }
 };
 
+class HRTrainerRequests : public ServerScript
+{
+public:
+    HRTrainerRequests() : ServerScript("HabilidadesRandomTrainerRequests") { }
+    bool CanPacketReceive(WorldSession* session, WorldPacket const& packet) override
+    {
+        // Trainer packets can bypass GossipHello. Reject them before the core deducts money.
+        if ((packet.GetOpcode() != CMSG_TRAINER_LIST && packet.GetOpcode() != CMSG_TRAINER_BUY_SPELL) ||
+            !session || !session->GetPlayer() || !sHabilidadesRandomMgr->TrainersBlocked(session->GetPlayer()))
+            return true;
+        if (packet.size() < sizeof(uint64))
+            return true; // Let the normal packet parser handle malformed requests.
+        WorldPacket copy(packet);
+        copy.rpos(0);
+        ObjectGuid guid;
+        copy >> guid;
+        Creature* creature = session->GetPlayer()->GetNPCIfCanInteractWith(guid, UNIT_NPC_FLAG_TRAINER);
+        if (!IsClassTrainer(creature))
+            return true;
+        ChatHandler(session).SendSysMessage("[Desafío] Los entrenadores de clase están bloqueados hasta completar el modo.");
+        return false;
+    }
+};
+
 using namespace Acore::ChatCommands;
 
 class HRNpcCommands : public CommandScript
@@ -214,4 +258,5 @@ void AddHabilidadesRandomScripts()
     new HRCharacterCreation();
     new HRPlayer();
     new HRChallengeNpc();
+    new HRTrainerRequests();
 }

@@ -34,6 +34,10 @@ def sql(statement, selected=True, success=True):
 def bootstrap():
     for statement in statements:
         sql(statement)
+    for table in ('mod_habilidades_random_meta', 'mod_habilidades_random_npcs'):
+        if sql("SELECT ENGINE FROM information_schema.tables WHERE TABLE_SCHEMA=DATABASE() "
+               "AND TABLE_NAME='" + table + "'") != 'InnoDB':
+            sql('ALTER TABLE `' + table + '` ENGINE=InnoDB')
     if sql('SELECT COUNT(*) FROM mod_habilidades_random_meta WHERE id=1') == '0':
         seed = ','.join('(' + i + ',' + r + ')' for i, r in rows)
         sql('START TRANSACTION; INSERT IGNORE INTO mod_habilidades_random_spell_rarity VALUES ' + seed +
@@ -47,6 +51,15 @@ sql('CREATE DATABASE `' + database + '`;', selected=False)
 try:
     bootstrap()
     assert sql('SELECT COUNT(*) FROM mod_habilidades_random_spell_rarity') == '474'
+    assert sql("SELECT COUNT(*) FROM information_schema.tables WHERE TABLE_SCHEMA=DATABASE() "
+               "AND ENGINE<>'InnoDB'") == '0'
+    # Old installs inherited the server default engine for these two tables.
+    # Upgrade both before seeding or using transactionally durable metadata.
+    sql('ALTER TABLE mod_habilidades_random_meta ENGINE=MyISAM; '
+        'ALTER TABLE mod_habilidades_random_npcs ENGINE=MyISAM;')
+    bootstrap()
+    assert sql("SELECT COUNT(*) FROM information_schema.tables WHERE TABLE_SCHEMA=DATABASE() "
+               "AND ENGINE<>'InnoDB'") == '0'
     sql('''INSERT INTO mod_habilidades_random_event
         (player_id,original_class,original_spec,original_specs,spell_count,talent_count,glyph_count)
         VALUES (1,1,1,2,2,1,1);

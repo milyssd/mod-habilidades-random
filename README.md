@@ -2,6 +2,8 @@
 
 Módulo de desarrollo para AzerothCore / WoW 3.3.5a. El evento usa **su propia base de datos** y crea sus tablas y pool desde C++. Por defecto reutiliza las credenciales que el core ya tiene configuradas, mediante una conexión independiente; no pide otra contraseña. No se importa ningún SQL en `world`, `characters` o `auth`.
 
+La versión **2.2.0-dev** incluye la configuración organizada en español, correcciones de persistencia, restauración de ambas especializaciones, selección de cartas y addon. Sigue pendiente validar el servidor completo y el cliente real antes de usarla en producción.
+
 ## Funcionamiento
 
 Un personaje de cualquier clase acepta el desafío en un NPC. Se guardan su clase, hechizos, talentos de ambas especializaciones, glifos y destrezas incompatibles con druida en la base privada. Pasa temporalmente a **druida conservando raza, género y apariencia racial**, obtiene poderes aleatorios y no puede asignar talentos. Profesiones, equitación y utilidades genéricas se conservan.
@@ -12,12 +14,15 @@ La clase y las habilidades actuales siguen formando parte del personaje normal: 
 
 ## Requisitos de código
 
-El core necesita permitir el registro de datos de clase y plantillas NPC **en memoria**. La API estándar del commit de referencia no expone ambas operaciones. Se incluye una extensión pequeña y acotada:
+El core necesita permitir el registro de datos de clase y plantillas NPC **en memoria**, y poder suspender el guardado de una sesión cuyo estado quedó incierto. Se incluyen estas extensiones:
 
 - `patches/hollowsource-3927b32-runtime-data.patch`: adaptado a los archivos `server.zip` del fork del usuario.
 - `patches/azerothcore-runtime-data.patch`: variante para el core de referencia.
+- `patches/player-save-guard.patch`: complemento obligatorio para evitar que el cierre de una sesión vuelva a guardar un personaje después de fallar su transacción.
 
-Son alternativas: **no aplicar ambos**. Añaden dos métodos de registro a `ObjectMgr`, sin consultas SQL. Rechazan colisiones y no sustituyen datos existentes. El módulo genera en memoria las combinaciones raza/druida ausentes y su NPC. Los perfiles originales de raza/clase permanecen intactos. Sin esta extensión el módulo rechaza el arranque, en lugar de recurrir a SQL de `world`.
+Las dos variantes de `runtime-data` son alternativas: **no aplicar ambas**. Añaden dos métodos de registro a `ObjectMgr`, sin consultas SQL. Rechazan colisiones y no sustituyen datos existentes. El módulo genera en memoria las combinaciones raza/druida ausentes y su NPC; conserva los perfiles existentes.
+
+El parche `player-save-guard` se aplica además de la variante runtime elegida. Añade una marca temporal a Player para bloquear los guardados completo, de inventario y de oro después de un fallo; el siguiente inicio de sesión crea un Player nuevo sin esa marca. Esto evita que el cierre normal guarde oro actualizado junto a un inventario cuyo guardado se había revertido. No añade columnas ni SQL a las bases del core. El módulo rechaza el arranque si falta alguna de las extensiones.
 
 El helper de instalación elige el parche que se pueda aplicar y reconoce una instalación ya preparada. Referencia adicional: AzerothCore `9eabf314a27b71d4e9cd513f6f2c08befe90d4ef`. Para otros commits hay que comprobar la compatibilidad. No se usan DBC ni MPQ personalizados.
 
@@ -27,14 +32,14 @@ La apertura de la base privada se hace desde `WorldScript::OnBeforeWorldInitiali
 
 La actualización del personaje usa `OnPlayerBeforeUpdate`. El adaptador `HRLearnSpellHook` comprueba la firma exacta de `OnPlayerCanLearnSpell`: si existe, rechaza el aprendizaje antes de realizarlo; si no existe, usa el hook histórico `OnPlayerLearnSpell`, retira el hechizo inmediatamente y corrige el paquete del libro en el siguiente tick. Se mantienen overrides reales en cada ruta.
 
-Durante el modo se bloquea el menú de entrenadores de clase; los entrenadores de profesiones se conservan. En un core con el hook antiguo, un intento de entrenamiento enviado directamente por un cliente modificado todavía puede cobrar dinero antes de que se retire el hechizo. No se promete reembolso automático en esa ruta.
+Durante el modo se bloquean el menú y las solicitudes directas a entrenadores de clase antes de que el core cobre la compra. Los entrenadores de profesiones se conservan. El hook de aprendizaje sigue protegiendo otras fuentes de hechizos normales de clase.
 
 Si compilaste una versión anterior y ves errores C3668 en esos hooks:
 
 1. Si el módulo se clonó como repositorio independiente, actualizar su carpeta con `git pull --ff-only`. Si se copió desde un ZIP, sustituirla por la descarga actualizada conservando la configuración local.
 2. Volver a configurar/generar el proyecto con CMake en el directorio de compilación que ya usabas.
 3. Recompilar `modules` y `worldserver` en Visual Studio. No quitar `override` manualmente.
-4. El parche runtime sigue siendo necesario. Si ya está aplicado, no volver a aplicarlo.
+4. Ejecutar el helper de preparación: reconoce el parche runtime anterior y añade la protección de guardado que falte. No aplicar manualmente una segunda variante runtime.
 
 Estas rutas eliminan las cinco dependencias incompatibles identificadas en la captura. Las firmas se contrastaron con los archivos reales de `server.zip`, además del core de referencia.
 
@@ -57,7 +62,7 @@ El paquete contiene solo una lista fija de archivos C++ necesarios y el hash del
    python modules/mod-habilidades-random/tools/prepare_core.py --core .
    ```
 
-   Se comprueba la aplicación antes de modificar los dos archivos de `ObjectMgr`. Si la API ya está completa, no hace cambios. Si detecta una aplicación parcial o un core incompatible, se detiene sin forzar. Se puede añadir `--check` para revisar sin aplicar.
+   Se comprueba la aplicación de todos los parches necesarios antes de modificar archivos. Si las dos API ya están completas, no hace cambios. También actualiza cores que ya tenían solo el parche runtime. Si detecta una aplicación parcial o un core incompatible, se detiene sin forzar. Se puede añadir `--check` para revisar sin aplicar.
 3. Instalar la configuración del módulo. La conexión es automática usando las credenciales de la base de personajes del core; basta dejar los valores predeterminados:
 
    ```ini
@@ -83,13 +88,25 @@ El NPC explica el desafío y pide confirmar la inscripción. Clic izquierdo en u
 
 La entrada runtime predeterminada es **900100**, configurable con `HabilidadesRandom.NpcEntry`. Debe estar libre. Si ya existe una plantilla ajena con ese ID, elegir otro; el módulo no la sobrescribe.
 
+## Configuración del evento
+
+El archivo `conf/mod_habilidades_random.conf.dist` está dividido en evento, NPC, elecciones, cambios y bloqueos, rarezas y base propia. Conserva los nombres de las opciones anteriores. No hay que escribir credenciales para la instalación predeterminada.
+
+`InitialDrafts` concede elecciones al inscribirse; `DraftsPerLevel` añade elecciones por niveles nuevos. `InitialRerolls` y `RerollsPerLevel` controlan los cambios de oferta. `InitialBans` es el saldo inicial de bloqueos. Los saldos no se gastan por una oferta incompleta, repetida o sin sustitutos disponibles, y bajar/subir el mismo nivel no genera premios adicionales.
+
+Las opciones `Distribution.*` son pesos relativos: pueden expresarse como `0.50`/`0.27` o `50`/`27`, y cero excluye una categoría. Se elige sin reemplazo y sin redondear a cero las categorías poco frecuentes. `PoolAmount` limita el conjunto temporal de candidatos antes de preparar las cartas. La categoría `Broken` requiere además `IncludeRarity5 = 1`. Si no existen tres candidatos elegibles, la inscripción no se inicia; durante un evento ya iniciado las elecciones se conservan para otro nivel.
+
+Después de actualizar esta versión, reemplazar también el addon del cliente: los bloqueos se sincronizan en fragmentos para respetar el tamaño de los mensajes.
+
 ## Separación de datos y recuperación
 
 La base privada contiene progreso, ofertas, saldos, bloqueos, propiedad de poderes, copias originales, versión de esquema y posiciones NPC. La conexión rechaza nombres de las bases del core y nombres de sistema. No hay archivos `data/sql/` que un actualizador pueda importar accidentalmente en `world` o `characters`.
 
 El esquema v2 añade la copia de destrezas que el core descarta al reconectar como druida, por ejemplo espadas o arcos de la clase original. Se guardan sus puntos, máximo y paso al inscribirse y se recuperan al terminar; no se retrocede el progreso de profesiones. La migración desde el esquema v1 es automática y aditiva. Las copias v1 permiten devolver clase y poderes, pero no pueden reconstruir puntos de destreza perdidos antes de existir esa copia; se avisa al restaurar.
 
-Los guardados se hacen en dos pasos: primero se confirma el estado en la base privada y se marca `character_pending`; después se llama al guardado normal de AzerothCore. Solo al confirmarlo se quita la marca. No se presupone una transacción atómica entre dos bases o servidores distintos. Si falla un paso, la copia y el estado deseado permiten reintentar y reconciliar al conectar. También se conserva el nivel 80 cuando su restauración quedó pendiente. Los talentos permanecen bloqueados hasta confirmar la restauración del personaje.
+Los guardados se hacen en dos pasos: primero se confirma el estado en la base privada y se marca `character_pending`; después se ejecuta el guardado generado por `Player::SaveToDB` y las sentencias preparadas del core. Una conexión propia comprueba `START TRANSACTION`, cada operación y `COMMIT`, sin reconectar y repetir una consulta a mitad de transacción. Esto evita depender del resultado incompleto de `ExecuteTransaction` del fork. No crea tablas ni consultas personalizadas de personajes. Solo al confirmar el guardado se quita la marca.
+
+No se presupone una transacción atómica entre dos bases o servidores distintos. Si una escritura privada o el guardado del personaje quedan sin confirmar, se detienen las acciones, se suspenden los guardados de esa sesión y se cierra para recuperar desde los datos durables al conectar. Un guardado del personaje pendiente se reconstruye con su proyección completa de hechizos, talentos, glifos y destrezas. También se conserva el nivel 80 cuando su restauración quedó pendiente. Los talentos permanecen bloqueados hasta confirmar la restauración del personaje.
 
 Si la base privada no se puede consultar, se rechaza temporalmente el inicio de sesión para no interpretar un fallo como ausencia de inscripción. Una conversión sin copia válida también se bloquea hasta recuperar la base correcta.
 
@@ -105,7 +122,7 @@ Si el NPC antiguo 900100 permanece en `world`, configurar otra entrada para el N
 
 ## Límites de las habilidades
 
-Maná, ira y energía usan capacidades y regeneración normales; no se rellenan infinitamente. Se excluyen recursos incompatibles, como runas/poder rúnico y foco. Formas, sigilo, posturas, armas, mascotas y otras dependencias todavía requieren validación y ajuste de la pool. No se promete que los 474 IDs sean utilizables en cualquier combinación. El equipo está sujeto a las restricciones de druida durante el evento. La mascota original se guarda al entrar y puede requerir volver a invocarla o usar el establo después.
+Maná, ira y energía usan capacidades y regeneración normales; no se rellenan infinitamente. Se excluyen recursos incompatibles, como runas/poder rúnico y foco, y efectos que el core impide usar como druida, como domar bestias. Llamar a una mascota requiere una mascota guardada compatible. Formas, sigilo, posturas, armas, mascotas y otras dependencias todavía requieren validación y ajuste de la pool. No se promete que los 474 IDs sean utilizables en cualquier combinación. El equipo está sujeto a las restricciones de druida durante el evento. La mascota original se guarda al entrar y puede requerir volver a invocarla o usar el establo después.
 
 Las cartas pueden incluir talentos activos oficiales; el bloqueo se refiere al aprendizaje y uso de los árboles de talentos del personaje.
 
@@ -122,9 +139,14 @@ g++ -std=c++17 -Wall -Wextra -Werror tests/test_database_connection.cpp -o /tmp/
 /tmp/hr-connection-tests
 g++ -std=c++17 -Wall -Wextra -Werror tests/test_learn_spell_hooks.cpp -o /tmp/hr-hook-tests
 /tmp/hr-hook-tests
+g++ -std=c++17 -Wall -Wextra -Werror tests/test_snapshot_rules.cpp -o /tmp/hr-snapshot-tests
+/tmp/hr-snapshot-tests
+g++ -std=c++17 -Wall -Wextra -Werror -Itests/runtime_stubs tests/test_runtime.cpp -o /tmp/hr-runtime-tests
+/tmp/hr-runtime-tests
 luac5.1 -p client/addon/HabilidadesRandom/SpellChoice.lua
 lua5.1 tests/test_addon.lua
 python -m unittest discover -s tests -p 'test_*core*.py'
+python tests/test_recovery_save.py
 python3 tests/test_sql.py --socket /ruta/al/socket-de-pruebas
 ```
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Prepare the core's in-memory registration API without changing database files."""
+"""Prepare runtime data and session save protection without changing database files."""
 import argparse
 from pathlib import Path
 import re
@@ -11,7 +11,9 @@ PATCHES = (
     MODULE_ROOT / 'patches/hollowsource-3927b32-runtime-data.patch',
     MODULE_ROOT / 'patches/azerothcore-runtime-data.patch',
 )
+SAVE_PATCHES = (MODULE_ROOT / 'patches/player-save-guard.patch',)
 GLOBALS = Path('src/server/game/Globals')
+PLAYER = Path('src/server/game/Entities/Player')
 METHODS = ('RegisterRuntimePlayerInfo', 'RegisterRuntimeCreatureTemplate')
 PARAMETERS = {
     'RegisterRuntimePlayerInfo': (
@@ -48,11 +50,34 @@ def _api_status(core):
     return 'absent'
 
 
-def _git_apply(core, patch, check):
+def _save_guard_status(core):
+    header = _code((core / PLAYER / 'Player.h').read_text(encoding='utf-8-sig'))
+    source = _code((core / PLAYER / 'PlayerStorage.cpp').read_text(encoding='utf-8-sig'))
+    checks = [bool(re.search(r'^\s*#\s*define\s+ACORE_MODULE_SAVE_GUARD\s+1\b', header, re.M)),
+              bool(re.search(r'\bvoid\s+SetModuleSaveSuppressed\s*\(\s*bool\s+(\w+)\s*\)\s*'
+                             r'\{\s*_moduleSaveSuppressed\s*=\s*\1\s*;\s*\}', header)),
+              bool(re.search(r'\bbool\s+_moduleSaveSuppressed\s*\{\s*false\s*\}\s*;', header))]
+    signatures = (
+        r'SaveToDB\s*\(\s*CharacterDatabaseTransaction\s+\w+\s*,\s*bool\s+\w+\s*,\s*bool\s+\w+\s*\)',
+        r'SaveInventoryAndGoldToDB\s*\(\s*CharacterDatabaseTransaction\s+\w+\s*\)',
+        r'SaveGoldToDB\s*\(\s*CharacterDatabaseTransaction\s+\w+\s*\)',
+    )
+    for signature in signatures:
+        checks.append(bool(re.search(r'\bvoid\s+Player\s*::\s*' + signature +
+                                     r'\s*\{\s*if\s*\(\s*_moduleSaveSuppressed\s*\)\s*return\s*;', source)))
+    if all(checks):
+        return 'ready'
+    if any(re.search(r'\b' + marker + r'\b', header + '\n' + source)
+           for marker in ('ACORE_MODULE_SAVE_GUARD', 'SetModuleSaveSuppressed', '_moduleSaveSuppressed')):
+        return 'partial'
+    return 'absent'
+
+
+def _git_apply(core, patches, check):
     command = ['git', 'apply']
     if check:
         command.append('--check')
-    command.extend(['--', str(patch)])
+    command.extend(['--'] + [str(patch) for patch in patches])
     try:
         return subprocess.run(command, cwd=core, check=False, capture_output=True,
                               text=True, encoding='utf-8', errors='replace')
@@ -61,34 +86,52 @@ def _git_apply(core, patch, check):
 
 
 def prepare(core, check=False):
-    """Return a status message; apply at most one compatible patch, unless check is set."""
+    """Check all missing features before applying their patches together."""
     core = Path(core).resolve()
-    if not all((core / GLOBALS / name).is_file() for name in ('ObjectMgr.h', 'ObjectMgr.cpp')):
-        raise PreparationError('La ruta debe ser la raíz del core: faltan src/server/game/Globals/ObjectMgr.h y/o ObjectMgr.cpp.')
-    status = _api_status(core)
-    if status == 'ready':
+    required = ((GLOBALS, 'ObjectMgr.h'), (GLOBALS, 'ObjectMgr.cpp'),
+                (PLAYER, 'Player.h'), (PLAYER, 'PlayerStorage.cpp'))
+    if not all((core / directory / name).is_file() for directory, name in required):
+        raise PreparationError('La ruta debe ser la raíz del core: faltan ObjectMgr.h/.cpp o Player.h/PlayerStorage.cpp en src/server/game.')
+    features = (('datos runtime', _api_status(core), PATCHES),
+                ('protección de guardado', _save_guard_status(core), SAVE_PATCHES))
+    if all(status == 'ready' for _, status, _ in features):
         return 'El core ya tiene la API completa; no se modificó ningún archivo.'
-    if status == 'partial':
-        raise PreparationError('La API está aplicada parcialmente o tiene una firma distinta. Revisa ObjectMgr.h y ObjectMgr.cpp; no se modificó ningún archivo.')
+    partial = [name for name, status, _ in features if status == 'partial']
+    if partial:
+        raise PreparationError('La API está aplicada parcialmente o tiene una firma distinta (' + ', '.join(partial) +
+                               '). Revisa sus archivos del core; no se modificó ningún archivo.')
 
-    failures = []
-    for patch in PATCHES:
-        if not patch.is_file():
-            failures.append(patch.name + ': falta el archivo de parche')
+    selected = []
+    for feature, status, patches in features:
+        if status == 'ready':
             continue
-        result = _git_apply(core, patch, check=True)
-        if result.returncode:
-            failures.append(patch.name + ': ' + (result.stderr.strip() or result.stdout.strip() or 'git apply --check falló'))
-            continue
-        if check:
-            return 'Parche compatible: ' + patch.name + '. Comprobación solamente; aún no se aplicó.'
-        applied = _git_apply(core, patch, check=False)
-        if applied.returncode:
-            raise PreparationError('No se pudo aplicar ' + patch.name + ': ' + (applied.stderr.strip() or applied.stdout.strip()))
-        if _api_status(core) != 'ready':
-            raise PreparationError('Git aplicó el parche, pero no se encontró la API completa. Revisa ObjectMgr.h y ObjectMgr.cpp antes de compilar.')
-        return 'Parche aplicado: ' + patch.name + '. Vuelve a generar el proyecto con CMake y compila.'
-    raise PreparationError('Ningún parche coincide con este core. No se modificó ningún archivo.\n' + '\n'.join(failures))
+        failures = []
+        for patch in patches:
+            if not patch.is_file():
+                failures.append(patch.name + ': falta el archivo de parche')
+                continue
+            result = _git_apply(core, [patch], check=True)
+            if result.returncode:
+                failures.append(patch.name + ': ' + (result.stderr.strip() or result.stdout.strip() or 'git apply --check falló'))
+                continue
+            selected.append(patch)
+            break
+        else:
+            raise PreparationError('Ningún parche coincide con este core para ' + feature +
+                                   '. No se modificó ningún archivo.\n' + '\n'.join(failures))
+    combined = _git_apply(core, selected, check=True)
+    if combined.returncode:
+        raise PreparationError('Los parches no se pueden aplicar juntos. No se modificó ningún archivo.\n' +
+                               (combined.stderr.strip() or combined.stdout.strip()))
+    names = ', '.join(patch.name for patch in selected)
+    if check:
+        return 'Parches compatibles: ' + names + '. Comprobación solamente; aún no se aplicó.'
+    applied = _git_apply(core, selected, check=False)
+    if applied.returncode:
+        raise PreparationError('No se pudieron aplicar los parches: ' + (applied.stderr.strip() or applied.stdout.strip()))
+    if _api_status(core) != 'ready' or _save_guard_status(core) != 'ready':
+        raise PreparationError('Git aplicó los parches, pero no se encontró la API completa. Revisa los archivos del core antes de compilar.')
+    return 'Parches aplicados: ' + names + '. Vuelve a generar el proyecto con CMake y compila.'
 
 
 def main():

@@ -1,0 +1,67 @@
+diff --git a/src/server/game/Entities/Player/Player.h b/src/server/game/Entities/Player/Player.h
+index 43482d4..e202037 100644
+--- a/src/server/game/Entities/Player/Player.h
++++ b/src/server/game/Entities/Player/Player.h
+@@ -18,6 +18,9 @@
+ #ifndef _PLAYER_H
+ #define _PLAYER_H
+ 
++// Session-local protection after an unconfirmed module character save.
++#define ACORE_MODULE_SAVE_GUARD 1
++
+ #include "ArenaTeam.h"
+ #include "Battleground.h"
+ #include "CharmInfo.h"
+@@ -1595,6 +1598,8 @@ public:
+     /***                   SAVE SYSTEM                     ***/
+     /*********************************************************/
+ 
++    void SetModuleSaveSuppressed(bool suppressed) { _moduleSaveSuppressed = suppressed; }
++
+     void SaveToDB(bool create, bool logout);
+     void SaveToDB(CharacterDatabaseTransaction trans, bool create, bool logout);
+     void SaveInventoryAndGoldToDB(CharacterDatabaseTransaction trans);                    // fast save function for item/money cheating preventing
+@@ -2986,6 +2991,8 @@ private:
+     Item* _StoreItem(uint16 pos, Item* pItem, uint32 count, bool clone, bool update);
+     Item* _LoadItem(CharacterDatabaseTransaction trans, uint32 zoneId, uint32 timeDiff, Field* fields);
+ 
++    bool _moduleSaveSuppressed{false};
++
+     CinematicMgr _cinematicMgr;
+ 
+     typedef GuidSet RefundableItemsSet;
+diff --git a/src/server/game/Entities/Player/PlayerStorage.cpp b/src/server/game/Entities/Player/PlayerStorage.cpp
+index c0e596e..bf2d9ac 100644
+--- a/src/server/game/Entities/Player/PlayerStorage.cpp
++++ b/src/server/game/Entities/Player/PlayerStorage.cpp
+@@ -7161,6 +7161,10 @@ void Player::SaveToDB(bool create, bool logout)
+ 
+ void Player::SaveToDB(CharacterDatabaseTransaction trans, bool create, bool logout)
+ {
++    // Dirty flags may already have been consumed by a transaction whose result is unknown.
++    if (_moduleSaveSuppressed)
++        return;
++
+     // delay auto save at any saves (manual, in code, or autosave)
+     m_nextSave = sWorld->getIntConfig(CONFIG_INTERVAL_SAVE);
+ 
+@@ -7223,11 +7227,19 @@ void Player::SaveToDB(CharacterDatabaseTransaction trans, bool create, bool logo
+ // fast save function for item/money cheating preventing - save only inventory and money state
+ void Player::SaveInventoryAndGoldToDB(CharacterDatabaseTransaction trans)
+ {
++    // Dirty flags may already have been consumed by a transaction whose result is unknown.
++    if (_moduleSaveSuppressed)
++        return;
++
+     _SaveInventory(trans);
+     SaveGoldToDB(trans);
+ }
+ 
+ void Player::SaveGoldToDB(CharacterDatabaseTransaction trans)
+ {
++    // Dirty flags may already have been consumed by a transaction whose result is unknown.
++    if (_moduleSaveSuppressed)
++        return;
++
+     CharacterDatabasePreparedStatement* stmt = CharacterDatabase.GetPreparedStatement(CHAR_UDP_CHAR_MONEY);
+     stmt->SetData(0, GetMoney());

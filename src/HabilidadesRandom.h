@@ -85,6 +85,7 @@ private:
     bool LoadPlayer(Player* player);
     bool Save(Player* player, HRPlayerState& state, bool savePlayer = false);
     bool SaveCharacter(Player* player);
+    void RequireRecovery(Player* player);
     void Suspend(Player* player);
     void SuspendTalents(Player* player);
     bool Generate(Player* player);
@@ -115,10 +116,11 @@ private:
     uint32 _rerollsPerLevel = 2;
     uint32 _initialBans = 5;
     uint32 _poolAmount = 45;
-    float _distribution[6] = {.50f, .27f, .14f, .06f, .03f, .01f};
+    std::array<float, 6> _distribution = {.50f, .27f, .14f, .06f, .03f, .01f};
     std::unordered_map<uint32, uint8> _rarities;
     std::unordered_set<uint32> _protected;
     std::unordered_map<uint32, HRPlayerState> _players;
+    std::unordered_set<uint32> _recoveryRequired;
 };
 
 #define sHabilidadesRandomMgr HabilidadesRandomMgr::instance()

@@ -29,6 +29,7 @@ FILES = (
 
 
 def collect(core, output):
+    core = core.resolve()
     if not (core / 'src/server/game').is_dir():
         raise ValueError('La ruta debe ser la raíz del core: falta src/server/game')
     head = None
@@ -39,17 +40,23 @@ def collect(core, output):
             head = result.stdout.strip()
     except FileNotFoundError:
         pass
-    present, missing = [], []
+    present, missing, skipped = [], [], []
     # Exclusive creation protects an existing archive. No configs, SQL, git remotes or credentials are collected.
     with ZipFile(output, 'x', ZIP_DEFLATED) as archive:
         for name in FILES:
             source = core / name
+            parts = Path(name).parts
+            # A whitelisted name must not redirect to configuration or another
+            # directory through a file/directory symlink.
+            if any(core.joinpath(*parts[:index]).is_symlink() for index in range(1, len(parts) + 1)):
+                skipped.append(name)
+                continue
             if source.is_file():
                 archive.write(source, name)
                 present.append(name)
             else:
                 missing.append(name)
-        report = {'head': head, 'files': present, 'missing': missing}
+        report = {'head': head, 'files': present, 'missing': missing, 'skipped_symlinks': skipped}
         archive.writestr('compat-report.json', json.dumps(report, indent=2))
     return report
 
@@ -66,6 +73,8 @@ def main():
     print(f'ZIP creado: {args.output} ({len(report["files"])} archivos de código)')
     if report['missing']:
         print('Archivos ausentes registrados en compat-report.json: ' + str(len(report['missing'])))
+    if report['skipped_symlinks']:
+        print('Enlaces simbólicos omitidos para proteger archivos ajenos: ' + str(len(report['skipped_symlinks'])))
 
 
 if __name__ == '__main__':

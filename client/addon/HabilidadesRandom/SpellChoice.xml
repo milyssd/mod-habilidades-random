@@ -2,14 +2,14 @@
     xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
     xsi:schemaLocation="http://www.blizzard.com/wow/ui/ ..\FrameXML\UI.xsd">
 
-  <!-- Virtual Template for Spell Choice Button -->
+  <!-- El margen transparente de la carta no debe recibir clics. -->
 <Button name="SpellChoiceButtonTemplate" virtual="true" enableMouse="true">
   <Size><AbsDimension x="256" y="256"/></Size>
-  <HitRectInsets left="0" right="0" top="0" bottom="0"/>
+  <HitRectInsets left="38" right="38" top="28" bottom="28"/>
 
   <Layers>
 
-    <!-- Background -->
+    <!-- Fondo -->
     <Layer level="BACKGROUND">
       <Texture name="$parentBackground" file="Interface\AddOns\HabilidadesRandom\Textures\card.tga">
         <Anchors>
@@ -19,43 +19,45 @@
       </Texture>
     </Layer>
 
-    <!-- Spell Name -->
+    <!-- Nombre del poder -->
     <Layer level="ARTWORK">
       <FontString name="$parentName" inherits="GameFontNormal" justifyH="CENTER">
+        <Size x="168" y="32"/>
         <Anchors>
           <Anchor point="TOP" x="0" y="-38"/>
         </Anchors>
       </FontString>
     </Layer>
 
-    <!-- Icon -->
+    <!-- Icono -->
     <Layer level="ARTWORK">
-      <Texture name="$parentIcon" file="Interface\\Icons\\INV_Misc_QuestionMark" setAllPoints="false">
-        <Size x="120" y="120"/>
+      <Texture name="$parentIcon" file="Interface\Icons\INV_Misc_QuestionMark" setAllPoints="false">
+        <Size x="96" y="96"/>
         <Anchors>
-          <Anchor point="TOP" relativeTo="$parentName" relativePoint="BOTTOM" x="0" y="-25"/>
+          <Anchor point="TOP" relativeTo="$parentName" relativePoint="BOTTOM" x="0" y="-8"/>
         </Anchors>
       </Texture>
     </Layer>
 
   <Layer level="OVERLAY">
     <Texture name="$parentRarity" file="Interface\AddOns\HabilidadesRandom\Textures\COMM.tga">
-      <Size x="32" y="32"/>
+      <Size x="24" y="24"/>
       <Anchors>
-        <Anchor point="TOP" relativeTo="$parentIcon" relativePoint="BOTTOM" x="-0" y="18"/>
+        <Anchor point="TOP" relativeTo="$parentIcon" relativePoint="BOTTOM" x="0" y="8"/>
       </Anchors>
     </Texture>
   </Layer>
 
     <Layer level="OVERLAY">
       <FontString name="$parentLevelReq" inherits="GameFontNormalSmall">
+        <Size x="168" y="28"/>
         <Anchors>
-          <Anchor point="BOTTOM" x="0" y="51"/>
+          <Anchor point="BOTTOM" x="0" y="34"/>
         </Anchors>
         <Color r="1.0" g="0.82" b="0.0"/>
       </FontString>
     </Layer>
-    <!-- Selection Border -->
+    <!-- Borde de selección -->
     <Layer level="OVERLAY">
       <Texture name="$parentSelectionBorder" file="Interface\Buttons\UI-ActionButton-Border" hidden="true">
         <Size><AbsDimension x="160" y="180"/></Size>
@@ -68,7 +70,7 @@
   </Layers>
 
 </Button>
-  <!-- Main Spell Choice Frame -->
+  <!-- Ventana de elecciones -->
 <Frame name="SpellChoiceFrame" parent="UIParent" hidden="true" movable="true" frameStrata="FULLSCREEN_DIALOG" enableMouse="true">
     <Size><AbsDimension x="650" y="300"/></Size>
     <Anchors>
@@ -85,7 +87,7 @@
           <Anchors>
             <Anchor point="TOP" x="0" y="-20"/>
           </Anchors>
-          <Color r="1.0" g="0.85" b="0.1"/> <!-- Golden color -->
+          <Color r="1.0" g="0.85" b="0.1"/>
           <ShadowOffset>
             <AbsDimension x="1" y="-1"/>
           </ShadowOffset>
@@ -94,7 +96,7 @@
       </Layer>
     </Layers>
 
-    <!-- Spell Option Buttons -->
+    <!-- Cartas disponibles -->
     <Frames>
       <Button name="SpellChoiceButton1" inherits="SpellChoiceButtonTemplate" enableMouse="true">
         <Anchors>
@@ -114,28 +116,19 @@
         </Anchors>
       </Button>
 
-      <!-- Reroll Button -->
-      <Button name="SpellChoiceRerollButton" inherits="UIPanelButtonTemplate" text="Reroll">
-        <Size><AbsDimension x="100" y="24"/></Size>
+      <!-- Cambiar la oferta -->
+      <Button name="SpellChoiceRerollButton" inherits="UIPanelButtonTemplate" text="Cambiar">
+        <Size><AbsDimension x="130" y="24"/></Size>
         <Anchors>
           <Anchor point="BOTTOM" relativeTo="SpellChoiceTitle" relativePoint="TOP" x="0" y="10"/>
         </Anchors>
-        <Scripts>
-          <OnClick>
-            if SpellChoiceFrame and SpellChoiceFrame.RerollChoices then
-              SpellChoiceFrame:RerollChoices()
-            end
-          </OnClick>
-        </Scripts>
       </Button>
-      <!-- Dismiss Button -->
-      <Button name="SpellChoiceDismissButton" inherits="UIPanelButtonTemplate" text="Dismiss">
-        <Size><AbsDimension x="100" y="24"/></Size>
+      <!-- Ocultar o volver a abrir -->
+      <Button name="SpellChoiceDismissButton" inherits="UIPanelButtonTemplate" text="Ocultar">
+        <Size><AbsDimension x="180" y="24"/></Size>
         <Anchors>
           <Anchor point="CENTER" relativeTo="SpellChoiceTitle" relativePoint="TOP" x="0" y="-290"/>
         </Anchors>
-        <Scripts>
-        </Scripts>
       </Button>
     </Frames>
   </Frame>

@@ -13,16 +13,19 @@
 #include "World.h"
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <mutex>
 #include <sstream>
-#include <unordered_map>
+#include <unordered_set>
 
 namespace
 {
 std::recursive_mutex RuntimeMutex;
 uint32 NpcEntry = 900100;
 bool Prepared = false;
-std::unordered_map<ObjectGuid, uint32> Spawns;
+// Creature GUID counters are local to each map: GUID alone is not a unique spawn key.
+std::map<std::pair<uint32, ObjectGuid>, uint32> Spawns;
+std::unordered_set<uint32> EventOnlyDruidRaces;
 
 bool ValidMap(uint32 id)
 {
@@ -41,7 +44,7 @@ bool Spawn(uint32 rowId, uint32 mapId, Position const& position)
     if (!creature)
         return false;
     creature->setActive(true);
-    Spawns[creature->GetGUID()] = rowId;
+    Spawns[{mapId, creature->GetGUID()}] = rowId;
     return true;
 }
 }
@@ -51,7 +54,7 @@ bool HRRuntime::Prepare()
     std::lock_guard<std::recursive_mutex> lock(RuntimeMutex);
     if (Prepared)
         return true;
-#ifndef ACORE_RUNTIME_MODULE_DATA
+#if !defined(ACORE_RUNTIME_MODULE_DATA) || !defined(ACORE_MODULE_SAVE_GUARD)
     LOG_ERROR("server.loading", "HabilidadesRandom: ejecutar python modules/mod-habilidades-random/tools/prepare_core.py --core . desde la raíz del core y recompilar. No se escribirá en world.");
     return false;
 #else
@@ -102,6 +105,7 @@ bool HRRuntime::Prepare()
             }
         if (!sObjectMgr->RegisterRuntimePlayerInfo(race, CLASS_DRUID, synthetic, levels))
             return false;
+        EventOnlyDruidRaces.insert(race);
     }
     NpcEntry = sConfigMgr->GetOption<uint32>("HabilidadesRandom.NpcEntry", 900100);
     CreatureTemplate const* source = sObjectMgr->GetCreatureTemplate(68);
@@ -117,6 +121,7 @@ bool HRRuntime::Prepare()
     npc.minlevel = npc.maxlevel = 80;
     npc.faction = 35;
     npc.npcflag = UNIT_NPC_FLAG_GOSSIP;
+    npc.unit_flags |= UNIT_FLAG_IMMUNE_TO_PC | UNIT_FLAG_IMMUNE_TO_NPC;
     npc.flags_extra = CREATURE_FLAG_EXTRA_CIVILIAN | CREATURE_FLAG_EXTRA_CANNOT_ENTER_COMBAT;
     npc.ScriptID = 0; // AllCreatureScript dispatches without a database ScriptName binding.
     npc.AIName.clear();
@@ -153,20 +158,16 @@ void HRRuntime::LoadNpcs()
 bool HRRuntime::PlaceNpc(Player* player)
 {
     std::lock_guard<std::recursive_mutex> lock(RuntimeMutex);
-    if (!Prepared || !HRDatabaseStore.IsOpen() || !ValidMap(player->GetMapId()) || player->GetTransport())
+    if (!player || !Prepared || !HRDatabaseStore.IsOpen() || !ValidMap(player->GetMapId()) || player->GetTransport())
         return false;
     std::ostringstream sql;
     sql.imbue(std::locale::classic());
     sql.precision(9);
     sql << "INSERT INTO mod_habilidades_random_npcs (map_id,x,y,z,o) VALUES (" << player->GetMapId() << ',' <<
         player->GetPositionX() << ',' << player->GetPositionY() << ',' << player->GetPositionZ() << ',' << player->GetOrientation() << ')';
-    if (!HRDatabaseStore.Execute(sql.str()))
+    uint32 rowId = 0;
+    if (!HRDatabaseStore.ExecuteInsert(sql.str(), rowId))
         return false;
-    // This is the only auto-increment insert used by this connection; runtime commands are serialized.
-    auto id = HRDatabaseStore.Query("SELECT LAST_INSERT_ID()");
-    if (!id)
-        return false;
-    uint32 rowId = id->Fetch()[0].Get<uint32>();
     if (Spawn(rowId, player->GetMapId(), player->GetPosition()))
         return true;
     HRDatabaseStore.Execute("DELETE FROM mod_habilidades_random_npcs WHERE id=" + std::to_string(rowId));
@@ -178,7 +179,7 @@ bool HRRuntime::RemoveNpc(Creature* creature)
     std::lock_guard<std::recursive_mutex> lock(RuntimeMutex);
     if (!creature)
         return false;
-    auto found = Spawns.find(creature->GetGUID());
+    auto found = Spawns.find({creature->GetMapId(), creature->GetGUID()});
     if (found == Spawns.end() || !HRDatabaseStore.Execute("DELETE FROM mod_habilidades_random_npcs WHERE id=" + std::to_string(found->second)))
         return false;
     Spawns.erase(found);
@@ -190,4 +191,10 @@ bool HRRuntime::IsNpc(Creature const* creature)
 {
     std::lock_guard<std::recursive_mutex> lock(RuntimeMutex);
     return Prepared && creature && creature->GetEntry() == NpcEntry;
+}
+
+bool HRRuntime::IsEventOnlyDruidRace(uint32 race)
+{
+    std::lock_guard<std::recursive_mutex> lock(RuntimeMutex);
+    return EventOnlyDruidRaces.count(race) != 0;
 }

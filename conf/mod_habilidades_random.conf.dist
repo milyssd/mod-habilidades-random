@@ -1,32 +1,97 @@
+###############################################################################
+#                        HABILIDADES ALEATORIAS                               #
+#                     Desafío de leveo hasta nivel 80                          #
+###############################################################################
+#
+# El jugador acepta el desafío en un NPC y pasa a druida temporalmente,
+# conservando su raza. Recibe poderes aleatorios y no puede asignar talentos.
+# Al nivel 80 recupera su clase, poderes y talentos originales.
+#
+# La base del módulo se crea al arrancar worldserver. No hay SQL que importar.
+# Por defecto se usan las credenciales del core; no hace falta otra contraseña.
+#
+###############################################################################
+
 [worldserver]
-# Automatically reuse the core's character DB credentials through a separate connection.
-# Only this private database receives the module's tables/pool. Use a different name per realm.
-# The MySQL account already used by the core needs CREATE on this private database.
-HabilidadesRandom.DatabaseName = "mod_habilidades_random"
-# Optional separate connection. Leave empty (or omit) to inherit credentials; no extra password needed.
-# If set: host;port_or_socket;username;password;private_database[;ssl] (overrides DatabaseName).
-HabilidadesRandom.DatabaseInfo = ""
-# Runtime-only NPC template. Do not use .npc add (that command writes to world).
-# Use .hr npc to place it, .hr removenpc to remove the selected event NPC.
-HabilidadesRandom.NpcEntry = 900100
-# Entry is opt-in through npc_habilidades_random_event, never automatic.
-# Disabling closes enrollment; current participants are restored on their next login/check/level change.
+
+#==============================================================================
+# 1. EVENTO
+#==============================================================================
+
+# 1 = permitir inscripciones. 0 = cerrar el evento y restaurar participantes
+# cuando estén vivos, fuera de combate y sin teletransportarse.
 HabilidadesRandom.Enable = 1
-HabilidadesRandom.InitialDrafts = 1
-HabilidadesRandom.DraftsPerLevel = 1
-HabilidadesRandom.InitialRerolls = 5
-HabilidadesRandom.RerollsPerLevel = 2
-HabilidadesRandom.InitialBans = 5
-HabilidadesRandom.PoolAmount = 45
-HabilidadesRandom.IncludeRarity5 = 0
-# Only applies to active participants. Restoration bypasses this guard.
+
+# Bloquear el aprendizaje normal de hechizos de clase durante el desafío.
+# No afecta a profesiones. Los talentos siempre permanecen bloqueados
+# hasta completar la restauración al nivel 80.
 HabilidadesRandom.BlockTrainerSpells = 1
+
+#==============================================================================
+# 2. NPC DEL DESAFÍO
+#==============================================================================
+
+# Entrada de la plantilla creada en memoria. El ID debe estar libre.
+# Como GM: .hr npc para colocarlo; .hr removenpc para retirar el seleccionado.
+# Su posición se guarda en la base del módulo.
+HabilidadesRandom.NpcEntry = 900100
+
+#==============================================================================
+# 3. ELECCIONES DE PODERES
+#==============================================================================
+
+# Elecciones disponibles al aceptar el desafío.
+HabilidadesRandom.InitialDrafts = 1
+
+# Elecciones adicionales por cada nivel nuevo alcanzado.
+HabilidadesRandom.DraftsPerLevel = 1
+
+# Tamaño del conjunto de candidatos utilizado para preparar las cartas.
+HabilidadesRandom.PoolAmount = 45
+
+#==============================================================================
+# 4. CAMBIOS DE CARTAS Y BLOQUEOS
+#==============================================================================
+
+# Cambios de oferta disponibles al entrar. Cada cambio sustituye las tres cartas.
+HabilidadesRandom.InitialRerolls = 5
+
+# Cambios adicionales por cada nivel nuevo alcanzado.
+HabilidadesRandom.RerollsPerLevel = 2
+
+# Poderes que se pueden bloquear durante el desafío.
+# Un bloqueo sustituye esa carta y evita que vuelva a aparecer.
+HabilidadesRandom.InitialBans = 5
+
+#==============================================================================
+# 5. RAREZA DE LAS CARTAS
+#==============================================================================
+
+# Habilitar la categoría experimental (Broken). Requiere validar sus poderes
+# en el servidor antes de abrir el evento a los jugadores.
+HabilidadesRandom.IncludeRarity5 = 0
+
+# Pesos relativos de las categorías. No tienen que sumar 1.
+# 0 = excluir esa categoría de las ofertas nuevas.
+# La categoría experimental solo participa si IncludeRarity5 = 1.
 HabilidadesRandom.Distribution.Common = 0.50
 HabilidadesRandom.Distribution.Uncommon = 0.27
 HabilidadesRandom.Distribution.Rare = 0.14
 HabilidadesRandom.Distribution.Epic = 0.06
 HabilidadesRandom.Distribution.Legendary = 0.03
 HabilidadesRandom.Distribution.Broken = 0.01
-# Talents are always locked during the event and unlocked at 80.
-# The old DisableTalents/KeepHybridResources/ResetOnLevelDecrease settings are no longer used.
-# Rage and energy use normal regeneration/consumption, without infinite refills.
+
+#==============================================================================
+# 6. BASE DE DATOS PROPIA
+#==============================================================================
+
+# Nombre de la base que contendrá únicamente las tablas de este módulo.
+# Si tienes varios reinos en el mismo MySQL, usa un nombre distinto por reino.
+HabilidadesRandom.DatabaseName = "mod_habilidades_random"
+
+# Conexión opcional para instalaciones avanzadas. Normalmente debe quedar vacía:
+# así se reutilizan las credenciales ya configuradas para personajes en el core.
+# Esa cuenta MySQL necesita permiso para crear y administrar la base del módulo.
+# Formato opcional: host;puerto_o_socket;usuario;contraseña;base_privada[;ssl]
+# Si se completa, la base incluida en esta cadena tiene prioridad sobre DatabaseName.
+HabilidadesRandom.DatabaseInfo = ""
