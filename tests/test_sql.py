@@ -1,9 +1,5 @@
 #!/usr/bin/env python3
-"""Integration checks against a disposable MariaDB/MySQL database.
-
-Requires --client, --socket, --core (an AzerothCore checkout). No production DB is used.
-Uses local socket authentication; do not put passwords in arguments.
-"""
+"""Test the actual schema embedded in C++, using only disposable private databases."""
 import argparse
 from pathlib import Path
 import re
@@ -13,11 +9,15 @@ import uuid
 parser = argparse.ArgumentParser()
 parser.add_argument('--client', default='mariadb')
 parser.add_argument('--socket', required=True)
-parser.add_argument('--core', required=True, type=Path)
 args = parser.parse_args()
 root = Path(__file__).resolve().parents[1]
 database = 'hr_test_' + uuid.uuid4().hex
 command = [args.client, '--no-defaults', '--socket=' + args.socket, '-u', 'root', '-N', '-B']
+header = (root / 'src/HRDatabaseSchema.h').read_text()
+statements = re.findall(r'R"HRSQL\((.*?)\)HRSQL"', header, re.S)
+rows = re.findall(r'^    \{(\d+), (\d+)\}', header, re.M)
+assert len(rows) == 474 and len({r[0] for r in rows}) == 474
+assert len(statements) == 8
 
 
 def sql(statement, selected=True, success=True):
@@ -30,17 +30,19 @@ def sql(statement, selected=True, success=True):
     return result.stdout.strip()
 
 
-def load(path):
-    sql(path.read_text())
+def bootstrap():
+    for statement in statements:
+        sql(statement)
+    if sql('SELECT COUNT(*) FROM mod_habilidades_random_meta WHERE id=1') == '0':
+        seed = ','.join('(' + i + ',' + r + ')' for i, r in rows)
+        sql('START TRANSACTION; INSERT IGNORE INTO mod_habilidades_random_spell_rarity VALUES ' + seed +
+            '; INSERT INTO mod_habilidades_random_meta VALUES (1,1); COMMIT;')
 
 
 sql('CREATE DATABASE `' + database + '`;', selected=False)
 try:
-    load(root / 'data/sql/db-characters/base/mod_habilidades_random.sql')
-    schema = root / 'data/sql/db-characters/base/event_schema.sql'
-    load(schema)
+    bootstrap()
     assert sql('SELECT COUNT(*) FROM mod_habilidades_random_spell_rarity') == '474'
-    # A snapshot includes independent spec masks, talent and glyph-slot rows.
     sql('''INSERT INTO mod_habilidades_random_event
         (player_id,original_class,original_spec,original_specs,spell_count,talent_count,glyph_count)
         VALUES (1,1,1,2,2,1,1);
@@ -48,10 +50,12 @@ try:
         (1,100,3,0),(1,200,1,0),(1,300,2,1),(1,400,3,2);
         INSERT INTO mod_habilidades_random_stats (player_id,total_expected_drafts,rerolls,bans)
         VALUES (1,2,5,5);''')
-    load(schema)
+    # Restart/bootstrap must preserve all snapshots and administrator edits to the pool.
+    sql('DELETE FROM mod_habilidades_random_spell_rarity WHERE spell_id=66;')
+    bootstrap()
+    assert sql('SELECT COUNT(*) FROM mod_habilidades_random_spell_rarity') == '473'
     assert sql('SELECT COUNT(*) FROM mod_habilidades_random_snapshot') == '4'
     assert sql('SELECT original_class,original_spec,original_specs FROM mod_habilidades_random_event') == '1\t1\t2'
-    # Failed ban/selection transactions must not partially consume balances.
     sql('''START TRANSACTION;
         UPDATE mod_habilidades_random_stats SET bans=4 WHERE player_id=1;
         INSERT INTO mod_habilidades_random_bans VALUES (1,100);
@@ -59,34 +63,34 @@ try:
         COMMIT;''', success=False)
     assert sql('SELECT bans FROM mod_habilidades_random_stats WHERE player_id=1') == '5'
     assert sql('SELECT COUNT(*) FROM mod_habilidades_random_bans') == '0'
-    print('PASS: characters schema, 474 IDs, immutable snapshot, both specs, glyphs and transaction rollback')
+    print('PASS: embedded schema, initial seed, non-destructive restart, backups, dual spec, glyphs and rollback')
 
-    # Use actual upstream schemas; world data is loaded only into this disposable database.
-    world = args.core / 'data/sql/base/db_world'
-    load(world / 'playercreateinfo.sql')
-    for name in ['creature_template', 'creature_template_model']:
-        source = (world / (name + '.sql')).read_text()
-        create = re.search(r'CREATE TABLE `' + name + r'` \(.*?\) ENGINE=.*?;', source, re.S)
-        assert create, name
-        sql(create.group())
-    original = sql('SELECT * FROM playercreateinfo ORDER BY race,class')
-    native = sql('SELECT * FROM playercreateinfo WHERE class=11 ORDER BY race')
-    migration = root / 'data/sql/db-world/base/event_npc.sql'
-    load(migration)
-    assert sql('SELECT COUNT(*) FROM playercreateinfo WHERE class=11') == '10'
-    assert sql('SELECT * FROM playercreateinfo WHERE class=11 AND race IN (4,6) ORDER BY race') == native
-    assert sql('SELECT ScriptName FROM creature_template WHERE entry=900100') == 'npc_habilidades_random_event'
-    assert sql('SELECT COUNT(*) FROM creature_template_model WHERE CreatureID=900100') == '1'
-    first = sql('SELECT * FROM playercreateinfo ORDER BY race,class')
-    load(migration)
-    assert sql('SELECT * FROM playercreateinfo ORDER BY race,class') == first
-    assert all(line in first.splitlines() for line in original.splitlines())
-    # An administrator's custom NPC with the same entry must never be overwritten.
-    sql("DELETE FROM creature_template_model WHERE CreatureID=900100; "
-        "UPDATE creature_template SET ScriptName='some_other_module' WHERE entry=900100;")
-    load(migration)
-    assert sql('SELECT ScriptName FROM creature_template WHERE entry=900100') == 'some_other_module'
-    assert sql('SELECT COUNT(*) FROM creature_template_model WHERE CreatureID=900100') == '0'
-    print('PASS: 10 race/druid pairs, original racial data, repeatable migration, NPC and collision protection')
+    # Model a crash AFTER the module commit and BEFORE the core character save.
+    sql('''START TRANSACTION;
+        UPDATE mod_habilidades_random_stats SET successful_drafts=1 WHERE player_id=1;
+        INSERT INTO mod_habilidades_random_drafted_spells VALUES (1,500);
+        UPDATE mod_habilidades_random_event SET revision=1,character_pending=1 WHERE player_id=1;
+        COMMIT;''')
+    bootstrap()  # New process still sees the authoritative spell and retry marker.
+    assert sql('SELECT character_pending,revision FROM mod_habilidades_random_event WHERE player_id=1') == '1\t1'
+    assert sql('SELECT spell_id FROM mod_habilidades_random_drafted_spells WHERE player_guid=1') == '500'
+    # Pending completion must also survive loss of the final acknowledgment.
+    sql('UPDATE mod_habilidades_random_event SET completed=1,completion_level=80,character_pending=1,revision=2 WHERE player_id=1')
+    bootstrap()
+    assert sql('SELECT completed,character_pending,completion_level FROM mod_habilidades_random_event WHERE player_id=1') == '1\t1\t80'
+    sql('UPDATE mod_habilidades_random_event SET character_pending=0 WHERE player_id=1 AND revision=2')
+    assert sql('SELECT completed,character_pending FROM mod_habilidades_random_event WHERE player_id=1') == '1\t0'
+    assert sql('SELECT COUNT(*) FROM mod_habilidades_random_snapshot WHERE player_id=1') == '4'
+    # NPC positions also belong exclusively to the module database.
+    sql('INSERT INTO mod_habilidades_random_npcs (map_id,x,y,z,o) VALUES (0,1,2,3,0)')
+    bootstrap()
+    assert sql('SELECT map_id,x,y,z,o FROM mod_habilidades_random_npcs') == '0\t1\t2\t3\t0'
+    print('PASS: durable pending journal, replay markers, completed snapshots and persistent module-owned NPC positions')
+
+    assert not (root / 'data/sql').exists(), 'No SQL import directories may remain'
+    for path in (root / 'src').glob('*.cpp'):
+        source = path.read_text()
+        assert not re.search(r'(?:CharacterDatabase|WorldDatabase)\.(?:Query|Execute|DirectExecute)\s*\(', source), path
+    print('PASS: no raw queries to core pools and no world/characters SQL import files')
 finally:
     sql('DROP DATABASE `' + database + '`;', selected=False)

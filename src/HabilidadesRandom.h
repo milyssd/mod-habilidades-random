@@ -24,6 +24,8 @@ struct HRSavedSpell
 struct HRPlayerState
 {
     bool completed = false;
+    bool characterPending = false;
+    uint8 completionLevel = 0;
     uint64 revision = 0;
     uint32 updateTimer = 0;
     bool transitioning = false;
@@ -69,6 +71,7 @@ private:
     HabilidadesRandomMgr();
     bool LoadPlayer(Player* player);
     bool Save(Player* player, HRPlayerState& state, bool savePlayer = false);
+    bool SaveCharacter(Player* player);
     void Suspend(Player* player);
     void SuspendTalents(Player* player);
     bool Generate(Player* player);

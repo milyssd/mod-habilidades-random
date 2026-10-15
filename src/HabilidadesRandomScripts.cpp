@@ -1,4 +1,12 @@
 #include "HabilidadesRandom.h"
+#include "HRDatabase.h"
+#include "HRRuntime.h"
+#include "AllCreatureScript.h"
+#include "CommandScript.h"
+#include "Config.h"
+#include "DatabaseScript.h"
+#include "RBAC.h"
+#include "World.h"
 #include "AccountScript.h"
 #include "Chat.h"
 #include "Creature.h"
@@ -12,7 +20,28 @@ class HRWorld : public WorldScript
 public:
     HRWorld() : WorldScript("HabilidadesRandomWorld") { }
     void OnAfterConfigLoad(bool) override { sHabilidadesRandomMgr->LoadConfig(); }
-    void OnStartup() override { sHabilidadesRandomMgr->Initialize(); }
+    void OnBeforeWorldInitialized() override
+    {
+        if (!HRRuntime::Prepare())
+            World::StopNow(ERROR_EXIT_CODE);
+    }
+    void OnStartup() override
+    {
+        sHabilidadesRandomMgr->Initialize();
+        HRRuntime::LoadNpcs();
+    }
+};
+
+class HRDatabaseLifecycle : public DatabaseScript
+{
+public:
+    HRDatabaseLifecycle() : DatabaseScript("HabilidadesRandomDatabase") { }
+    bool OnModuleDatabasesLoading() override
+    {
+        return HRDatabaseStore.Open(sConfigMgr->GetOption<std::string>("HabilidadesRandom.DatabaseInfo", ""));
+    }
+    void OnModuleDatabasesKeepAlive() override { HRDatabaseStore.KeepAlive(); }
+    void OnModuleDatabasesClosing() override { HRDatabaseStore.Close(); }
 };
 
 class HRPlayer : public PlayerScript
@@ -78,13 +107,15 @@ public:
     }
 };
 
-class HRChallengeNpc : public CreatureScript
+class HRChallengeNpc : public AllCreatureScript
 {
 public:
-    HRChallengeNpc() : CreatureScript("npc_habilidades_random_event") { }
+    HRChallengeNpc() : AllCreatureScript("HabilidadesRandomNpc") { }
 
-    bool OnGossipHello(Player* player, Creature* creature) override
+    bool CanCreatureGossipHello(Player* player, Creature* creature) override
     {
+        if (!HRRuntime::IsNpc(creature))
+            return false;
         ClearGossipMenuFor(player);
         if (sHabilidadesRandomMgr->IsParticipant(player))
             AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Ver mis elecciones pendientes", GOSSIP_SENDER_MAIN, 3);
@@ -94,8 +125,10 @@ public:
         return true;
     }
 
-    bool OnGossipSelect(Player* player, Creature* creature, uint32 sender, uint32 action) override
+    bool CanCreatureGossipSelect(Player* player, Creature* creature, uint32 sender, uint32 action) override
     {
+        if (!HRRuntime::IsNpc(creature))
+            return false;
         ClearGossipMenuFor(player);
         if (sender != GOSSIP_SENDER_MAIN)
             return false;
@@ -117,8 +150,41 @@ public:
     }
 };
 
+using namespace Acore::ChatCommands;
+
+class HRNpcCommands : public CommandScript
+{
+public:
+    HRNpcCommands() : CommandScript("HabilidadesRandomNpcCommands") { }
+    ChatCommandTable GetCommands() const override
+    {
+        static ChatCommandTable commands = {
+            {"npc", Place, rbac::RBAC_PERM_COMMAND_NPC_ADD, Console::No},
+            {"removenpc", Remove, rbac::RBAC_PERM_COMMAND_NPC_ADD, Console::No}
+        };
+        static ChatCommandTable root = {{"hr", commands}};
+        return root;
+    }
+    static bool Place(ChatHandler* handler)
+    {
+        if (!HRRuntime::PlaceNpc(handler->GetPlayer()))
+        {
+            handler->SendSysMessage("No se pudo crear el NPC. Solo continentes normales; comprobar la base propia y el parche del core.");
+            return false;
+        }
+        handler->SendSysMessage("NPC creado y guardado en la base del evento. No se escribió ningún spawn en world.");
+        return true;
+    }
+    static bool Remove(ChatHandler* handler)
+    {
+        return HRRuntime::RemoveNpc(handler->getSelectedCreature());
+    }
+};
+
 void AddHabilidadesRandomScripts()
 {
+    new HRDatabaseLifecycle();
+    new HRNpcCommands();
     new HRWorld();
     new HRCharacterCreation();
     new HRPlayer();

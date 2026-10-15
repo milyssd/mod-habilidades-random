@@ -1,4 +1,12 @@
 [worldserver]
+# REQUIRED private DB connection (never world/auth/characters). Fill credentials locally.
+# host;port_or_socket;username;password;private_database[;ssl]
+# On startup C++ creates this database/tables/pool. The account needs CREATE on this private DB.
+# Do not reuse a user that can modify core schemas.
+HabilidadesRandom.DatabaseInfo = "127.0.0.1;3306;hr_event;CHANGE_ME;mod_habilidades_random"
+# Runtime-only NPC template. Do not use .npc add (that command writes to world).
+# Use .hr npc to place it, .hr removenpc to remove the selected event NPC.
+HabilidadesRandom.NpcEntry = 900100
 # Entry is opt-in through npc_habilidades_random_event, never automatic.
 # Disabling closes enrollment; current participants are restored on their next login/check/level change.
 HabilidadesRandom.Enable = 1

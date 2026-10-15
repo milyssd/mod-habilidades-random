@@ -1,74 +1,98 @@
-# Habilidades Random — desafío temporal hasta nivel 80
+# Habilidades Random — evento hasta nivel 80 con base propia
 
-Módulo para AzerothCore / WoW 3.3.5a. Versión de desarrollo para pruebas en un servidor de ensayo.
+Módulo de desarrollo para AzerothCore / WoW 3.3.5a. El evento usa **su propia base de datos** y crea sus tablas y pool desde C++. No se importa ningún SQL en `world`, `characters` o `auth`.
 
-## Reglas del evento
+## Funcionamiento
 
-- Un personaje de cualquier clase acepta el desafío hablando con el NPC. No se inscribe automáticamente a nadie.
-- Antes de modificarlo, se guarda una copia persistente de su clase, habilidades, talentos de ambas especializaciones y glifos.
-- Pasa temporalmente a clase **druida**. Su raza, género y modelos raciales no se cambian: un humano sigue siendo humano.
-- Se suspenden las habilidades de clase originales y los talentos. Profesiones, equitación y utilidades genéricas se conservan.
-- Recibe una elección inicial y una más por nivel, configurables. Cada oferta tiene tres poderes oficiales de la pool SQL.
-- No puede aprender talentos durante el desafío, tampoco cambiando de especialización. Los glifos originales se guardan y sus efectos se suspenden.
-- Maná, ira y energía están habilitados mediante el hook de recursos de AzerothCore. No se rellenan infinitamente cada tick.
-- Al llegar al **nivel 80**, se retiran los poderes del evento y se restauran su clase, habilidades, talentos y glifos originales. Después puede aprender en entrenadores; no recibe automáticamente todas las habilidades de nivel 80.
-- Si llega al 80 en combate, muerto o durante un teletransporte, la restauración espera a que esté vivo y en una situación segura. Se reintenta automáticamente cada segundo. Mientras tanto no se permite aprender talentos de druida.
-- Las desconexiones conservan el progreso. La copia original se mantiene incluso después de completar el evento.
-- Una participación por personaje. Bajar y volver a subir niveles no proporciona elecciones extra ni elimina la copia original.
+Un personaje de cualquier clase acepta el desafío en un NPC. Se guardan su clase, habilidades, talentos de ambas especializaciones y glifos en la base privada. Pasa temporalmente a **druida conservando raza, género y apariencia racial**, obtiene poderes aleatorios y no puede asignar talentos. Profesiones, equitación y utilidades genéricas se conservan.
 
-## Instalación en un servidor de ensayo
+Al llegar al nivel **80**, se retiran los poderes del evento y se restauran los poderes originales. Puede volver a usar entrenadores; no aprende automáticamente todas las habilidades de nivel 80. Si está muerto, en combate o teletransportándose, la restauración espera una situación segura y se reintenta automáticamente. La copia original se conserva después de terminar. Una participación por personaje; bajar y volver a subir niveles no genera elecciones adicionales.
 
-1. Hacer copia de las bases de datos y detener `worldserver` antes de sustituir una versión instalada.
-2. Copiar esta carpeta, conservando el nombre `mod-habilidades-random`, dentro de `modules/`.
-3. En una instalación nueva, aplicar `data/sql/db-characters/base/mod_habilidades_random.sql` en `acore_characters`.
-   Este archivo sustituye la pool. En una actualización que ya tiene esa pool instalada, no es necesario repetirlo.
-4. Aplicar **también** `data/sql/db-characters/base/event_schema.sql` en `acore_characters`.
-   Esta migración es aditiva y repetible; no sustituye las copias de personajes existentes.
-5. Revisar que la entrada de criatura **900100** esté libre. Aplicar `data/sql/db-world/base/event_npc.sql` en `acore_world`.
-   Si se usa otra entrada, cambiarla en ambos INSERT. No se sobrescriben criaturas ajenas existentes.
-6. Reconfigurar y compilar AzerothCore con el módulo. El core detecta `src/` y su loader automáticamente.
-7. Instalar `conf/mod_habilidades_random.conf.dist` como configuración del módulo y revisar los valores.
-8. **Reiniciar** `worldserver`: el SQL de mundo añade las combinaciones raza/druida necesarias para reconectar sin cambiar de raza.
-   Los datos de nivel se obtienen del sistema actual de estadísticas de clase y modificadores raciales de AzerothCore.
-9. Crear el NPC en el lugar elegido con `.npc add 900100`.
-10. Copiar `client/addon/HabilidadesRandom` a `Interface/AddOns/HabilidadesRandom` del cliente y activarlo.
+La clase y las habilidades actuales siguen formando parte del personaje normal: **AzerothCore las guarda mediante sus API habituales**. Esto no crea tablas del evento ni instala consultas personalizadas en las bases del core. Los únicos datos adicionales del modo están en su base privada.
 
-El NPC explica el modo y pide aceptar. Clic izquierdo en una carta: elegir. Clic derecho: bloquear. El botón Reroll cambia la oferta si hay tres sustitutos; no cobra cuando no puede generarlos.
+## Requisitos de código
 
-Las filas adicionales de `playercreateinfo` permiten cargar personajes inscritos de cualquier raza como druidas. El módulo impide crear directamente druidas de razas no nativas mediante un cliente modificado. No se instalan DBC ni MPQ personalizados.
+El core necesita permitir el registro de datos de clase y plantillas NPC **en memoria**. La API estándar del commit de referencia no expone ambas operaciones. Se incluye una extensión pequeña y acotada:
 
-## Actualizaciones y recuperación
+`patches/azerothcore-runtime-data.patch`
 
-- Los personajes con registros de poderes de la versión antigua no se inscriben automáticamente ni se usan como una supuesta copia original. Su inscripción se rechaza para no mezclar poderes heredados con habilidades normales. Requieren revisión y migración por separado.
-- No borrar ni vaciar `mod_habilidades_random_event` o `mod_habilidades_random_snapshot`.
-- Una pool vacía/inaccesible cierra las nuevas inscripciones. No se usa como motivo para borrar habilidades. Los participantes con copia válida se restauran de forma segura.
-- Desactivar `HabilidadesRandom.Enable` cierra las inscripciones y restaura a los participantes conectados cuando sea seguro; los desconectados se restauran al volver a entrar.
-- **No retirar el módulo ni las combinaciones raza/druida mientras haya participantes sin restaurar.** Verificar primero `SELECT COUNT(*) FROM mod_habilidades_random_event WHERE completed=0;`. Un personaje desconectado conserva su clase temporal hasta que vuelve a entrar y se restaura.
-- Los guardados de selección incluyen saldos, oferta, bans y propiedad de hechizos en una misma transacción. Se confirma su resultado antes de publicar el nuevo estado. Las transiciones también guardan al personaje. Se usan los workers de AzerothCore porque sus sentencias de guardado son preparadas para conexiones asíncronas.
-- Se espera la confirmación del guardado en el hilo del mundo. Es una limitación de rendimiento de esta primera versión: medir la latencia y carga con el número real de participantes antes de un evento concurrido.
+Añade dos métodos de registro a `ObjectMgr`, sin consultas SQL. Rechaza colisiones y no sustituye datos existentes. El módulo genera en memoria las combinaciones raza/druida ausentes y su NPC. Los perfiles originales de raza/clase permanecen intactos. Sin esta extensión el módulo rechaza el arranque, en lugar de recurrir a SQL de `world`.
 
-## Límites de las habilidades multiclase
+Referencia comprobada: AzerothCore `9eabf314a27b71d4e9cd513f6f2c08befe90d4ef`. Para otros commits hay que comprobar la aplicación y compatibilidad del parche. No se usan DBC ni MPQ personalizados.
 
-La clase druida resuelve la disponibilidad de maná/ira/energía, pero no convierte automáticamente todas las habilidades en utilizables. Se excluyen poderes con recursos incompatibles, como runas/poder rúnico y foco. Formas, sigilo, posturas, armas, mascotas y dependencias entre poderes siguen requiriendo validación y ajuste de la pool. No se promete que los 474 IDs sean utilizables en cualquier combinación. El equipo queda sujeto a las restricciones de druida durante el evento; conviene entrar con equipo compatible. La mascota original se guarda/dismiss al entrar y puede requerir volver a invocarla o usar el establo al completar el modo.
+## Instalación
 
-Los talentos activos obtenidos como cartas siguen siendo poderes aleatorios; el bloqueo se refiere a aprender/asignar puntos en los árboles de talentos.
+1. Copiar el módulo como `modules/mod-habilidades-random` dentro de AzerothCore.
+2. Desde la raíz de AzerothCore, comprobar y aplicar el parche de código:
 
-## Validación realizada
+   ```sh
+   git apply --check modules/mod-habilidades-random/patches/azerothcore-runtime-data.patch
+   git apply modules/mod-habilidades-random/patches/azerothcore-runtime-data.patch
+   ```
 
-Ver `VALIDACION.md` para resultados y límites. La comprobación de C++ contra encabezados reales no equivale a enlazar un worldserver ni a probar el ciclo con cliente y datos de juego.
+   Si ya está aplicado, no repetirlo. Si falla la comprobación, adaptar el parche al commit de destino; no forzar su aplicación ni reiniciar sobre un core incompatible.
+3. Instalar la configuración del módulo y completar **localmente** `HabilidadesRandom.DatabaseInfo`:
 
-Pruebas locales desde la carpeta del módulo:
+   ```ini
+   HabilidadesRandom.DatabaseInfo = "127.0.0.1;3306;hr_event;CONTRASEÑA_LOCAL;mod_habilidades_random"
+   ```
+
+   Formato del core: `host;puerto_o_socket;usuario;contraseña;base_privada[;ssl]`. Usar una base propia **por reino**. La cuenta MySQL debe existir y tener permisos para crear esa base y administrar únicamente sus tablas. No necesita permisos sobre las bases del core. No subir la configuración con contraseñas a GitHub.
+4. Reconfigurar, compilar e instalar `worldserver` con el módulo y reiniciarlo.
+5. Al arrancar, el módulo crea la base, ocho tablas y la pool inicial de 474 IDs. Los siguientes arranques conservan las copias y los cambios de la pool; no la reemplazan.
+6. Como GM, ir al lugar elegido y ejecutar:
+
+   ```text
+   .hr npc
+   ```
+
+   El NPC y su posición pertenecen al módulo. No ejecutar `.npc add 900100`: ese comando normal del core escribe spawns en `world`. Para retirar un NPC del evento, seleccionarlo y ejecutar `.hr removenpc`.
+7. Copiar `client/addon/HabilidadesRandom` a `Interface/AddOns/HabilidadesRandom` del cliente y activar el addon.
+
+El NPC explica el desafío y pide confirmar la inscripción. Clic izquierdo en una carta: elegir. Clic derecho: bloquear. Reroll cambia la oferta solo si hay tres sustitutos disponibles. Los NPC se pueden colocar en los continentes 0, 1, 530 y 571; sus posiciones se restauran desde la base del evento en cada arranque. No se guardan en instancias ni transportes.
+
+La entrada runtime predeterminada es **900100**, configurable con `HabilidadesRandom.NpcEntry`. Debe estar libre. Si ya existe una plantilla ajena con ese ID, elegir otro; el módulo no la sobrescribe.
+
+## Separación de datos y recuperación
+
+La base privada contiene progreso, ofertas, saldos, bloqueos, propiedad de poderes, copias originales, versión de esquema y posiciones NPC. La conexión rechaza nombres de las bases del core y nombres de sistema. No hay archivos `data/sql/` que un actualizador pueda importar accidentalmente en `world` o `characters`.
+
+Los guardados se hacen en dos pasos: primero se confirma el estado en la base privada y se marca `character_pending`; después se llama al guardado normal de AzerothCore. Solo al confirmarlo se quita la marca. No se presupone una transacción atómica entre dos bases o servidores distintos. Si falla un paso, la copia y el estado deseado permiten reintentar y reconciliar al conectar. También se conserva el nivel 80 cuando su restauración quedó pendiente. Los talentos permanecen bloqueados hasta confirmar la restauración del personaje.
+
+Si la base privada no se puede consultar, se rechaza temporalmente el inicio de sesión para no interpretar un fallo como ausencia de inscripción. Una conversión sin copia válida también se bloquea hasta recuperar la base correcta.
+
+Los guardados confirmados son síncronos desde el punto de vista del hilo de juego. Se debe medir la latencia con la carga esperada antes de abrir un evento concurrido.
+
+Desactivar `HabilidadesRandom.Enable` cierra la inscripción y restaura participantes cuando sea seguro. No retirar el módulo, su base ni el parche mientras queden participantes sin restaurar. Los desconectados se restauran al volver a entrar. No borrar las copias para permitir una nueva inscripción.
+
+## Si ya instalaste la versión anterior
+
+**No actualizar con personajes todavía dentro del desafío anterior.** Primero restaurarlos usando esa versión y guardar una copia de sus bases. Esta versión no lee, migra ni elimina tablas del evento que se hayan instalado previamente en `characters`, ni filas antiguas de `world`. La ausencia de esos cambios en la nueva versión no deshace SQL ya ejecutado.
+
+Si el NPC antiguo 900100 permanece en `world`, configurar otra entrada para el NPC runtime, por ejemplo 900101. La limpieza de los datos antiguos debe revisarse por separado con copias de seguridad; no se automatiza una eliminación destructiva.
+
+## Límites de las habilidades
+
+Maná, ira y energía usan capacidades y regeneración normales; no se rellenan infinitamente. Se excluyen recursos incompatibles, como runas/poder rúnico y foco. Formas, sigilo, posturas, armas, mascotas y otras dependencias todavía requieren validación y ajuste de la pool. No se promete que los 474 IDs sean utilizables en cualquier combinación. El equipo está sujeto a las restricciones de druida durante el evento. La mascota original se guarda al entrar y puede requerir volver a invocarla o usar el establo después.
+
+Las cartas pueden incluir talentos activos oficiales; el bloqueo se refiere al aprendizaje y uso de los árboles de talentos del personaje.
+
+## Pruebas locales
+
+Ver `VALIDACION.md` para resultados y límites. Desde la carpeta del módulo:
 
 ```sh
 g++ -std=c++17 -Wall -Wextra -Werror tests/test_draft_state.cpp -o /tmp/hr-state-tests
 /tmp/hr-state-tests
+g++ -std=c++17 -Wall -Wextra -Werror tests/test_database_schema.cpp -o /tmp/hr-schema-tests
+/tmp/hr-schema-tests
 luac5.1 -p client/addon/HabilidadesRandom/SpellChoice.lua
 lua5.1 tests/test_addon.lua
-python3 tests/test_sql.py --socket /ruta/al/socket-de-pruebas --core /ruta/a/azerothcore
+python3 tests/test_sql.py --socket /ruta/al/socket-de-pruebas
 ```
 
-El test SQL crea una base desechable con nombre aleatorio, prueba las migraciones contra esquemas reales de AzerothCore y la borra al terminar. Debe usarse un servidor de base de datos de ensayo con autenticación local y permisos para crear bases.
+El test SQL crea y borra una base desechable con nombre aleatorio. Ejecutarlo únicamente en un servidor de ensayo con autenticación local y permisos para crear bases.
 
 ## Autoría
 
-Basado en el módulo original de Hollow / Prestige & Draft Mode incluido en el ZIP del usuario. Se conserva la licencia MIT suministrada.
+Basado en el módulo original de Hollow / Prestige & Draft Mode incluido en el ZIP del usuario. Se conserva la licencia MIT suministrada. El parche de integración se aplica a archivos de AzerothCore bajo la licencia y autoría de ese proyecto.

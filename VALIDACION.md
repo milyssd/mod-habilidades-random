@@ -1,20 +1,25 @@
-# Validación de esta entrega
+# Validación — base privada y registro desde código
 
-Referencia de API: AzerothCore `9eabf314a27b71d4e9cd513f6f2c08befe90d4ef`.
+Referencia: AzerothCore `9eabf314a27b71d4e9cd513f6f2c08befe90d4ef` con el parche incluido.
 
-Comprobaciones completadas:
+Comprobaciones realizadas:
 
-- Todas las unidades C++ del módulo pasan `g++ -std=gnu++20 -fsyntax-only -Wall -Wextra -Werror=return-type` usando los encabezados reales de ese commit, Boost 1.83 y las dependencias de encabezados correspondientes. Se verifican los overrides y las llamadas a las API. No se configuró ni compiló el core completo.
-- Compilación y ejecución del test de reglas de estado: rechaza elecciones ajenas, bans y rerolls sin sustitutos o saldo; comprueba el límite 79/80/81, la participación explícita y los bloqueos durante la restauración.
-- El addon pasa el análisis de sintaxis con **Lua 5.1.5**. El test ejecuta su código real con dobles de la API de WoW: recepción de lista de bans vacía, inscripción después de estado inactivo, cartas, ban, selección, ocultar/abrir, rechazo de remitente ajeno y cierre definitivo frente a callbacks pendientes.
-- Integración SQL con **MariaDB 11.8.6**, en una base desechable. Se comprobaron los 474 IDs únicos de la pool, las copias de ambas especializaciones y glifos, la conservación de copias al repetir el esquema y el rollback de un guardado fallido.
-- El SQL de mundo se probó contra los esquemas reales del core. Añade las diez combinaciones raza/druida, conserva las combinaciones y coordenadas previas, se puede repetir y no sobrescribe un NPC ajeno con entrada coincidente.
+- Unidades C++ del módulo: `g++ -std=gnu++20 -fsyntax-only -Wall -Wextra -Werror=return-type` con encabezados reales del core y dependencias.
+- Archivo `ObjectMgr.cpp` con las dos API nuevas: misma comprobación de C++ sobre el archivo real. El linter C++ de AzerothCore pasó. No se configuró, compiló ni enlazó el core completo.
+- Test compilado de reglas: ofertas ajenas, saldos, bans/rerolls sin reemplazos y límites de participación/restauración.
+- Test compilado del esquema embebido: ocho tablas y 474 IDs únicos. Se comprueba el rechazo de nombres de bases del core/sistema e identificadores inválidos.
+- Lua 5.1.5: sintaxis y ejecución del addon real con dobles de la API WoW. Lista de bloqueos vacía, inscripción después de estado inactivo, recepción de cartas, selección, bloqueo, ocultar/abrir, remitentes ajenos y callbacks pendientes tras cerrar.
+- MariaDB 11.8.6, base desechable: se ejecutaron los DDL extraídos del encabezado C++ real; se comprobaron creación, primer sembrado, repetición sin reemplazar la pool, copias de ambas especializaciones y glifos, y rollback de un guardado fallido.
+- Se comprobaron en SQL las marcas persistentes de reconciliación: interrupción después del commit del evento, finalización pendiente con nivel 80, conservación de la copia y acuse final. Esto verifica el esquema/journal, no sustituye una prueba real del guardado de Player.
+- Posiciones NPC: persistencia en la base privada y conservación al repetir el arranque.
+- Comprobación de aislamiento: no quedan importaciones SQL para bases del core ni llamadas raw Query/Execute a CharacterDatabase/WorldDatabase en el módulo. El guardado del personaje usa las API y sentencias preparadas existentes de AzerothCore.
 
 Pendiente antes de producción:
 
-- Enlazar/compilar `worldserver` en la versión exacta del servidor de destino.
-- Ensayo real con cliente 3.3.5a, datos DBC/mapas y bases de AzerothCore: NPC → copia → conversión manteniendo raza → combate y elecciones → reconexión → nivel 80 → restauración. Incluir cada clase original, ambas especializaciones, glifos y personajes con mascota.
-- Validación funcional de las habilidades elegibles, sus dependencias, posturas, formas, armas y mascotas. El filtro de recursos no sustituye esas pruebas.
-- Medir el coste de los guardados confirmados con la carga esperada del evento.
+- Compilar y enlazar el servidor completo en el commit exacto del destino.
+- Probar apertura automática de la conexión y permisos con el usuario MySQL real del evento.
+- Probar en el juego `.hr npc`, interacción, persistencia del NPC tras reiniciar, conversión sin cambiar de raza y restauración de cada clase al 80.
+- Interrumpir de verdad el proceso o una conexión entre el commit privado y el guardado del core; comprobar la reconciliación de personajes, talentos y glifos.
+- Validar poderes, requisitos de armas/formas/mascotas y rendimiento bajo carga.
 
-Estos resultados no certifican todavía que el desafío completo funcione dentro de WoW. La entrega es una primera implementación corregida y comprobada para continuar las pruebas de integración.
+No se certifica todavía el funcionamiento integral dentro de WoW. Es una versión de desarrollo con verificaciones parciales y requisitos explícitos de integración.
