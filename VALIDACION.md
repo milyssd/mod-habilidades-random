@@ -2,6 +2,13 @@
 
 Referencia: AzerothCore `9eabf314a27b71d4e9cd513f6f2c08befe90d4ef` con el parche incluido.
 
+Compatibilidad corregida después de la captura C3668:
+
+- Se reprodujeron exactamente los cinco errores retirando esos cinco métodos de los encabezados de referencia, sin cambiar las demás API. Es una simulación de la superficie de hooks ausentes, no un checkout del core del usuario.
+- Se comprueba el módulo completo contra los encabezados normales y contra esa superficie reducida.
+- Un test C++17 ejecuta el despacho virtual real del adaptador para una API anterior, una API reciente y una firma diferente. Verifica que las llamadas llegan al bloqueo correcto.
+- Destino indicado por el usuario: `yafeth950-test/hollowsource`, commit `3927b32566d2910b332decb4fa97e3a2e0879b40`. El acceso disponible devuelve `Repository not found`, por lo que no se pudieron inspeccionar sus fuentes. No se ha ejecutado MSVC ni se certifica ese fork.
+
 Comprobaciones realizadas:
 
 - Unidades C++ del módulo: `g++ -std=gnu++20 -fsyntax-only -Wall -Wextra -Werror=return-type` con encabezados reales del core y dependencias.

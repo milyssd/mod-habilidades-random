@@ -1,10 +1,10 @@
 #include "HabilidadesRandom.h"
 #include "HRDatabase.h"
 #include "HRRuntime.h"
+#include "HRLearnSpellHook.h"
 #include "AllCreatureScript.h"
 #include "CommandScript.h"
 #include "Config.h"
-#include "DatabaseScript.h"
 #include "RBAC.h"
 #include "World.h"
 #include "AccountScript.h"
@@ -22,35 +22,56 @@ public:
     void OnAfterConfigLoad(bool) override { sHabilidadesRandomMgr->LoadConfig(); }
     void OnBeforeWorldInitialized() override
     {
-        if (!HRRuntime::Prepare())
+        // These world hooks are available on cores without module database lifecycle hooks.
+        if (!HRDatabaseStore.Open(sConfigMgr->GetOption<std::string>("HabilidadesRandom.DatabaseInfo", "")) ||
+            !HRRuntime::Prepare())
             World::StopNow(ERROR_EXIT_CODE);
+    }
+    void OnUpdate(uint32 diff) override
+    {
+        if (diff < _keepAliveTimer)
+        {
+            _keepAliveTimer -= diff;
+            return;
+        }
+        _keepAliveTimer = 60000;
+        HRDatabaseStore.KeepAlive();
+    }
+    void OnAfterUnloadAllMaps() override
+    {
+        // Wait until player/map callbacks have stopped, then close our own connection.
+        HRDatabaseStore.Close();
     }
     void OnStartup() override
     {
         sHabilidadesRandomMgr->Initialize();
         HRRuntime::LoadNpcs();
     }
+private:
+    uint32 _keepAliveTimer = 60000;
 };
 
-class HRDatabaseLifecycle : public DatabaseScript
+struct HRLearnSpellCallbacks
 {
-public:
-    HRDatabaseLifecycle() : DatabaseScript("HabilidadesRandomDatabase") { }
-    bool OnModuleDatabasesLoading() override
+    static bool BeforeLearn(Player* player, uint32 id)
     {
-        return HRDatabaseStore.Open(sConfigMgr->GetOption<std::string>("HabilidadesRandom.DatabaseInfo", ""));
+        return sHabilidadesRandomMgr->CanLearnSpell(player, id);
     }
-    void OnModuleDatabasesKeepAlive() override { HRDatabaseStore.KeepAlive(); }
-    void OnModuleDatabasesClosing() override { HRDatabaseStore.Close(); }
+    static void AfterLearn(Player* player, uint32 id)
+    {
+        sHabilidadesRandomMgr->OnLearnSpell(player, id);
+    }
 };
 
-class HRPlayer : public PlayerScript
+using HRPlayerBase = HRLearnSpellHook<PlayerScript, HRLearnSpellCallbacks>;
+
+class HRPlayer : public HRPlayerBase
 {
 public:
-    HRPlayer() : PlayerScript("HabilidadesRandomPlayer") { }
+    HRPlayer() : HRPlayerBase("HabilidadesRandomPlayer") { }
     void OnPlayerLogin(Player* player) override { sHabilidadesRandomMgr->OnLogin(player); }
     void OnPlayerLogout(Player* player) override { sHabilidadesRandomMgr->OnLogout(player); }
-    void OnPlayerAfterUpdate(Player* player, uint32 diff) override
+    void OnPlayerBeforeUpdate(Player* player, uint32 diff) override
     {
         sHabilidadesRandomMgr->Update(player, diff);
     }
@@ -70,10 +91,6 @@ public:
     bool OnPlayerCanLearnTalent(Player* player, TalentEntry const*, uint32) override
     {
         return !sHabilidadesRandomMgr->TalentsLocked(player);
-    }
-    bool OnPlayerCanLearnSpell(Player* player, uint32 id) override
-    {
-        return sHabilidadesRandomMgr->CanLearnSpell(player, id);
     }
     bool OnPlayerHasActivePowerType(Player const* player, Powers power) override
     {
@@ -115,7 +132,15 @@ public:
     bool CanCreatureGossipHello(Player* player, Creature* creature) override
     {
         if (!HRRuntime::IsNpc(creature))
+        {
+            if (creature->HasNpcFlag(UNIT_NPC_FLAG_TRAINER_CLASS) && sHabilidadesRandomMgr->TrainersBlocked(player))
+            {
+                CloseGossipMenuFor(player);
+                ChatHandler(player->GetSession()).SendSysMessage("[Desafío] Los entrenadores de clase están bloqueados hasta completar el modo.");
+                return true;
+            }
             return false;
+        }
         ClearGossipMenuFor(player);
         if (sHabilidadesRandomMgr->IsParticipant(player))
             AddGossipItemFor(player, GOSSIP_ICON_CHAT, "Ver mis elecciones pendientes", GOSSIP_SENDER_MAIN, 3);
@@ -183,7 +208,6 @@ public:
 
 void AddHabilidadesRandomScripts()
 {
-    new HRDatabaseLifecycle();
     new HRNpcCommands();
     new HRWorld();
     new HRCharacterCreation();

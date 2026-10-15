@@ -39,6 +39,7 @@ struct HRPlayerState
     std::vector<HRSavedSpell> talents;
     std::unordered_set<uint32> drafted;
     std::unordered_set<uint32> bans;
+    std::unordered_set<uint32> rejectedLearned;
     std::chrono::steady_clock::time_point lastRequest{};
 };
 
@@ -56,6 +57,8 @@ public:
     bool IsParticipant(Player const* player) const;
     bool TalentsLocked(Player const* player) const;
     bool CanLearnSpell(Player const* player, uint32 id) const;
+    bool TrainersBlocked(Player const* player) const;
+    void OnLearnSpell(Player* player, uint32 id);
     bool HasHybridPower(Player const* player, uint8 power) const;
     void OnLogin(Player* player);
     void OnLogout(Player* player);

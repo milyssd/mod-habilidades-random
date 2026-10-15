@@ -20,6 +20,31 @@ Añade dos métodos de registro a `ObjectMgr`, sin consultas SQL. Rechaza colisi
 
 Referencia comprobada: AzerothCore `9eabf314a27b71d4e9cd513f6f2c08befe90d4ef`. Para otros commits hay que comprobar la aplicación y compatibilidad del parche. No se usan DBC ni MPQ personalizados.
 
+## Compatibilidad de hooks y recompilación
+
+La apertura de la base privada se hace desde `WorldScript::OnBeforeWorldInitialized`, su keepalive desde `OnUpdate` y su cierre después de descargar los mapas. No se requieren los hooks recientes `OnModuleDatabasesLoading`, `OnModuleDatabasesKeepAlive` o `OnModuleDatabasesClosing`.
+
+La actualización del personaje usa `OnPlayerBeforeUpdate`. El adaptador `HRLearnSpellHook` comprueba la firma exacta de `OnPlayerCanLearnSpell`: si existe, rechaza el aprendizaje antes de realizarlo; si no existe, usa el hook histórico `OnPlayerLearnSpell`, retira el hechizo inmediatamente y corrige el paquete del libro en el siguiente tick. Se mantienen overrides reales en cada ruta.
+
+Durante el modo se bloquea el menú de entrenadores de clase; los entrenadores de profesiones se conservan. En un core con el hook antiguo, un intento de entrenamiento enviado directamente por un cliente modificado todavía puede cobrar dinero antes de que se retire el hechizo. No se promete reembolso automático en esa ruta.
+
+Si compilaste una versión anterior y ves errores C3668 en esos hooks:
+
+1. Si el módulo se clonó como repositorio independiente, actualizar su carpeta con `git pull --ff-only`. Si se copió desde un ZIP, sustituirla por la descarga actualizada conservando la configuración local.
+2. Volver a configurar/generar el proyecto con CMake en el directorio de compilación que ya usabas.
+3. Recompilar `modules` y `worldserver` en Visual Studio. No quitar `override` manualmente.
+4. El parche runtime sigue siendo necesario. Si ya está aplicado, no volver a aplicarlo.
+
+Estas rutas eliminan las cinco dependencias incompatibles identificadas en la captura. Se comprobaron con los encabezados de referencia y una copia en la que faltan esos cinco métodos; no equivale a compilar todas las versiones de AzerothCore.
+
+El fork indicado por el usuario es `yafeth950-test/hollowsource`, commit `3927b32566d2910b332decb4fa97e3a2e0879b40`. No fue accesible desde este entorno (`Repository not found`). Si es privado, se puede generar un paquete pequeño para adaptar su API, ejecutando desde la raíz del core:
+
+```text
+python modules/mod-habilidades-random/tools/collect_core_compat.py --core . --output hollowsource-compat.zip
+```
+
+El paquete contiene solo una lista fija de archivos C++ necesarios y el hash del commit. No incluye configuración, SQL, remotos Git ni credenciales, y no sobrescribe un ZIP existente. Compartir ese archivo permite revisar el fork sin publicar el repositorio completo.
+
 ## Instalación
 
 1. Copiar el módulo como `modules/mod-habilidades-random` dentro de AzerothCore.
@@ -86,6 +111,8 @@ g++ -std=c++17 -Wall -Wextra -Werror tests/test_draft_state.cpp -o /tmp/hr-state
 /tmp/hr-state-tests
 g++ -std=c++17 -Wall -Wextra -Werror tests/test_database_schema.cpp -o /tmp/hr-schema-tests
 /tmp/hr-schema-tests
+g++ -std=c++17 -Wall -Wextra -Werror tests/test_learn_spell_hooks.cpp -o /tmp/hr-hook-tests
+/tmp/hr-hook-tests
 luac5.1 -p client/addon/HabilidadesRandom/SpellChoice.lua
 lua5.1 tests/test_addon.lua
 python3 tests/test_sql.py --socket /ruta/al/socket-de-pruebas

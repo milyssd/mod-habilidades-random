@@ -152,6 +152,26 @@ bool HabilidadesRandomMgr::CanLearnSpell(Player const* player, uint32 id) const
         !_blockTrainerSpells || !ShouldSuspend(id);
 }
 
+bool HabilidadesRandomMgr::TrainersBlocked(Player const* player) const
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    auto itr = _players.find(Guid(player));
+    return _blockTrainerSpells && itr != _players.end() &&
+        (!itr->second.completed || itr->second.characterPending) && !itr->second.transitioning;
+}
+
+void HabilidadesRandomMgr::OnLearnSpell(Player* player, uint32 id)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (CanLearnSpell(player, id))
+        return;
+    auto& state = _players.at(Guid(player));
+    // The legacy hook runs after addSpell: immediately remove its server-side effects.
+    // learnSpell may send its learned packet AFTER this callback, so correct the client on the next tick too.
+    state.rejectedLearned.insert(id);
+    player->removeSpell(id, SPEC_MASK_ALL, false);
+}
+
 bool HabilidadesRandomMgr::LoadPlayer(Player* player)
 {
     uint32 guid = Guid(player);
@@ -609,6 +629,22 @@ void HabilidadesRandomMgr::Update(Player* player, uint32 diff)
     auto itr = _players.find(Guid(player));
     if (itr == _players.end() || itr->second.transitioning)
         return;
+    if (!itr->second.rejectedLearned.empty())
+    {
+        auto rejected = std::move(itr->second.rejectedLearned);
+        itr->second.rejectedLearned.clear();
+        bool removed = false;
+        for (uint32 id : rejected)
+            if (!itr->second.drafted.count(id) && !CanLearnSpell(player, id))
+            {
+                if (player->HasSpell(id))
+                    player->removeSpell(id, SPEC_MASK_ALL, false);
+                player->SendLearnPacket(id, false);
+                removed = true;
+            }
+        if (removed)
+            Notice(player, "[Desafío] Hechizo normal bloqueado. Usa las elecciones del evento hasta completar el modo.");
+    }
     auto& timer = itr->second.updateTimer;
     if (diff < timer)
     {
