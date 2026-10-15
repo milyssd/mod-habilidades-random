@@ -1,5 +1,6 @@
 #include "HabilidadesRandom.h"
 #include "HRDatabase.h"
+#include "CharacterCache.h"
 #include "Chat.h"
 #include "Config.h"
 #include "DatabaseEnv.h"
@@ -217,6 +218,42 @@ bool HabilidadesRandomMgr::LoadPlayer(Player* player)
         Notice(player, "[Desafío] Copia de seguridad incompleta. Contacta con un administrador; no se retirarán poderes.");
         return false;
     }
+    auto skillHeaderCount = HRDatabaseStore.Query("SELECT COUNT(*) FROM mod_habilidades_random_skill_snapshot_meta WHERE player_id=" +
+        std::to_string(guid));
+    if (!skillHeaderCount)
+        return false;
+    state.hasSkillSnapshot = skillHeaderCount->Fetch()[0].Get<uint32>() != 0;
+    if (state.hasSkillSnapshot)
+    {
+        auto skillHeader = HRDatabaseStore.Query("SELECT skill_count FROM mod_habilidades_random_skill_snapshot_meta WHERE player_id=" +
+            std::to_string(guid));
+        auto skillCount = HRDatabaseStore.Query("SELECT COUNT(*) FROM mod_habilidades_random_skill_snapshot WHERE player_id=" +
+            std::to_string(guid));
+        if (!skillHeader || !skillCount || skillHeader->Fetch()[0].Get<uint32>() != skillCount->Fetch()[0].Get<uint32>())
+            return false;
+        uint32 expectedSkills = skillHeader->Fetch()[0].Get<uint32>();
+        auto skillRows = HRDatabaseStore.Query("SELECT skill_id,skill_step,skill_value,skill_max FROM mod_habilidades_random_skill_snapshot WHERE player_id=" +
+            std::to_string(guid));
+        if (skillRows)
+            do
+            {
+                Field* row = skillRows->Fetch();
+                HRSavedSkill saved{row[0].Get<uint16>(), row[1].Get<uint16>(), row[2].Get<uint16>(), row[3].Get<uint16>()};
+                if (!saved.value || saved.value > saved.maximum ||
+                    !GetSkillRaceClassInfo(saved.id, player->getRace(), state.originalClass))
+                    return false;
+                state.skills.push_back(saved);
+            } while (skillRows->NextRow());
+        if (state.skills.size() != expectedSkills)
+            return false;
+    }
+    else if (!state.completed || state.characterPending)
+    {
+        // An older event has no historical skill values. Do not fabricate a backup
+        // from its already-converted character, or prevent its class restoration.
+        LOG_WARN("server.loading", "HabilidadesRandom: personaje {} con copia anterior sin destrezas; no se pueden recuperar valores históricos desconocidos.", guid);
+        Notice(player, "[Desafío] Copia antigua sin destrezas originales. Se recuperarán clase y poderes; los puntos de destrezas ya perdidos necesitan una copia anterior del servidor.");
+    }
     auto stats = HRDatabaseStore.Query("SELECT successful_drafts,total_expected_drafts,rerolls,bans,"
         "offered_spell_1,offered_spell_2,offered_spell_3,last_level FROM mod_habilidades_random_stats WHERE player_id=" +
         std::to_string(guid));
@@ -339,6 +376,17 @@ void HabilidadesRandomMgr::ChangeClass(Player* player, uint8 classId)
     player->RemoveAurasByType(SPELL_AURA_MOUNTED);
     // Only the class byte changes: race, gender and display IDs are untouched.
     player->SetByteValue(UNIT_FIELD_BYTES_0, 1, classId);
+    if (CharacterCacheEntry const* cached = sCharacterCache->GetCharacterCacheByGuid(player->GetGUID()))
+    {
+        // Re-adding updates the class but resets guild/arena fields. Preserve them,
+        // and keep the existing mail count and group entry in the core's cache.
+        CharacterCacheEntry saved = *cached;
+        sCharacterCache->AddCharacterCacheEntry(saved.Guid, saved.AccountId, saved.Name,
+            saved.Sex, saved.Race, classId, player->GetLevel());
+        sCharacterCache->UpdateCharacterGuildId(saved.Guid, saved.GuildId);
+        for (uint8 slot = 0; slot < saved.ArenaTeamId.size(); ++slot)
+            sCharacterCache->UpdateCharacterArenaTeamId(saved.Guid, slot, saved.ArenaTeamId[slot]);
+    }
     player->setPowerType(classId == CLASS_WARRIOR ? POWER_RAGE :
         classId == CLASS_ROGUE ? POWER_ENERGY : classId == CLASS_DEATH_KNIGHT ? POWER_RUNIC_POWER : POWER_MANA);
     auto& state = _players.at(Guid(player));
@@ -364,7 +412,7 @@ bool HabilidadesRandomMgr::Join(Player* player)
     }
     if (!sObjectMgr->GetPlayerInfo(player->getRace(), CLASS_DRUID))
     {
-        Notice(player, "[Desafío] Falta instalar el SQL de mundo para druida de tu raza y reiniciar el servidor.");
+        Notice(player, "[Desafío] No está preparado el perfil druida de tu raza; revisar el parche runtime y el arranque del módulo.");
         return false;
     }
     auto existing = HRDatabaseStore.Query("SELECT COUNT(*) FROM mod_habilidades_random_event WHERE player_id=" + std::to_string(Guid(player)));
@@ -389,6 +437,16 @@ bool HabilidadesRandomMgr::Join(Player* player)
     for (auto const& pair : player->GetTalentMap())
         if (pair.second->State != PLAYERSPELL_REMOVED && pair.second->State != PLAYERSPELL_TEMPORARY)
             state.talents.push_back({pair.first, pair.second->specMask});
+    // _LoadSkills discards class-incompatible skills before the login hook runs.
+    // Back up only those at risk; professions and shared skills retain live progress.
+    for (auto const& pair : player->GetSkillStatusMap())
+        if (pair.second.uState != SKILL_DELETED &&
+            GetSkillRaceClassInfo(pair.first, player->getRace(), state.originalClass) &&
+            !GetSkillRaceClassInfo(pair.first, player->getRace(), CLASS_DRUID))
+        {
+            uint16 id = uint16(pair.first);
+            state.skills.push_back({id, player->GetSkillStep(id), player->GetPureSkillValue(id), player->GetPureMaxSkillValue(id)});
+        }
     uint32 glyphCount = 0;
     for (uint8 spec = 0; spec < state.originalSpecs; ++spec)
     {
@@ -405,6 +463,14 @@ bool HabilidadesRandomMgr::Join(Player* player)
         "spell_count,talent_count,glyph_count) VALUES (" + guid + ',' + std::to_string(state.originalClass) + ',' +
         std::to_string(state.originalSpec) + ',' + std::to_string(state.originalSpecs) + ',' +
         std::to_string(state.spells.size()) + ',' + std::to_string(state.talents.size()) + ',' + std::to_string(glyphCount) + ')');
+    // Even an empty new snapshot has a header. Its absence means a legacy backup,
+    // never a license to guess values from a character that already joined.
+    transaction->Append("INSERT INTO mod_habilidades_random_skill_snapshot_meta VALUES (" + guid + ',' +
+        std::to_string(state.skills.size()) + ')');
+    for (HRSavedSkill const& skill : state.skills)
+        transaction->Append("INSERT INTO mod_habilidades_random_skill_snapshot VALUES (" + guid + ',' +
+            std::to_string(skill.id) + ',' + std::to_string(skill.step) + ',' + std::to_string(skill.value) + ',' +
+            std::to_string(skill.maximum) + ')');
     for (uint8 kind = 0; kind < 2; ++kind)
         for (HRSavedSpell const& spell : kind == 0 ? state.spells : state.talents)
             transaction->Append("INSERT INTO mod_habilidades_random_snapshot VALUES (" + guid + ',' +
@@ -499,6 +565,15 @@ bool HabilidadesRandomMgr::Restore(Player* player)
     if (!player->IsAlive() || player->IsInCombat() || player->IsBeingTeleported())
         return false; // Retried automatically after combat/resurrection/teleport.
     auto& state = itr->second;
+    auto restoreSkills = state.skills;
+    // Spell/talent cleanup can remove a dependent skill. Preserve its current
+    // progress before cleanup, without changing the immutable enrollment backup.
+    for (HRSavedSkill& skill : restoreSkills)
+    {
+        skill.step = std::max(skill.step, player->GetSkillStep(skill.id));
+        skill.value = std::max(skill.value, player->GetPureSkillValue(skill.id));
+        skill.maximum = std::max(skill.maximum, player->GetPureMaxSkillValue(skill.id));
+    }
     state.transitioning = true;
     SuspendTalents(player);
     // Also remove automatically loaded druid class spells that are not draft-owned.
@@ -534,6 +609,21 @@ bool HabilidadesRandomMgr::Restore(Player* player)
         auto found = player->GetSpellMap().find(spell.id);
         ok = ok && found != player->GetSpellMap().end() && found->second->State != PLAYERSPELL_REMOVED;
     }
+    for (HRSavedSkill const& skill : restoreSkills)
+    {
+        // Apply and verify skills after all spell-driven skill initialization.
+        // Restore a minimum, preserving any higher current value/rank. Shared
+        // professions and generic skills have no snapshot and keep live progress.
+        uint16 step = std::max(skill.step, player->GetSkillStep(skill.id));
+        uint16 value = std::max(skill.value, player->GetPureSkillValue(skill.id));
+        uint16 maximum = std::max(skill.maximum, player->GetPureMaxSkillValue(skill.id));
+        if (SkillRaceClassInfoEntry const* entry = GetSkillRaceClassInfo(skill.id, player->getRace(), state.originalClass))
+            if (GetSkillRangeType(entry) == SKILL_RANGE_LEVEL && maximum != 1)
+                maximum = std::max(maximum, player->GetMaxSkillValueForLevel());
+        player->SetSkill(skill.id, step, value, maximum);
+        ok = ok && player->GetSkillStep(skill.id) >= step && player->GetPureSkillValue(skill.id) >= value &&
+            player->GetPureMaxSkillValue(skill.id) >= maximum;
+    }
     if (!ok)
     {
         Notice(player, "[Desafío] Restauración incompleta: se conserva la copia para reintentarlo al conectar.");
@@ -565,6 +655,9 @@ bool HabilidadesRandomMgr::Restore(Player* player)
         return false;
     }
     state.transitioning = false;
+    // addSpell reconstructs server state without learned packets on the legacy
+    // core. Refresh the spellbook only after the complete restoration succeeds.
+    player->SendInitialSpells();
     Close(player);
     if (state.characterPending)
         return true;

@@ -20,7 +20,7 @@ int main()
         assert(ids.insert(entry.id).second);
     }
     assert(ids.size() == 474);
-    assert(std::size(HRSchema::Statements) == 8);
-    assert(HRSchema::Version == 1);
-    std::cout << "PASS: private schema isolation, identifier validation, embedded schema and 474 unique pool entries\n";
+    assert(std::size(HRSchema::Statements) == 10);
+    assert(HRSchema::Version == 2);
+    std::cout << "PASS: private schema isolation, identifier validation, skill snapshot schema and 474 unique pool entries\n";
 }

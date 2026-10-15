@@ -21,6 +21,14 @@ struct HRSavedSpell
     uint8 specMask;
 };
 
+struct HRSavedSkill
+{
+    uint16 id;
+    uint16 step;
+    uint16 value;
+    uint16 maximum;
+};
+
 struct HRPlayerState
 {
     bool completed = false;
@@ -30,6 +38,7 @@ struct HRPlayerState
     uint32 updateTimer = 0;
     bool transitioning = false;
     bool runesInitialized = false;
+    bool hasSkillSnapshot = false;
     uint8 originalClass = 0;
     uint8 originalSpec = 0;
     uint8 originalSpecs = 1;
@@ -37,6 +46,7 @@ struct HRPlayerState
     HRStats stats;
     std::vector<HRSavedSpell> spells;
     std::vector<HRSavedSpell> talents;
+    std::vector<HRSavedSkill> skills;
     std::unordered_set<uint32> drafted;
     std::unordered_set<uint32> bans;
     std::unordered_set<uint32> rejectedLearned;

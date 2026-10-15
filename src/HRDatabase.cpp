@@ -55,7 +55,18 @@ bool HRDatabase::InitializeSchema()
     if (count->Fetch()[0].Get<uint32>())
     {
         auto version = Query("SELECT version FROM mod_habilidades_random_meta WHERE id=1");
-        return version && version->Fetch()[0].Get<uint32>() == HRSchema::Version;
+        if (!version)
+            return false;
+        uint32 currentVersion = version->Fetch()[0].Get<uint32>();
+        if (currentVersion == HRSchema::Version)
+            return true;
+        // Version 2 adds only the skill snapshot tables created above. Existing
+        // event backups remain valid; their missing historical skills are unknown.
+        if (currentVersion == 1)
+            return _connection->Execute("UPDATE mod_habilidades_random_meta SET version=" +
+                std::to_string(HRSchema::Version) + " WHERE id=1 AND version=1");
+        LOG_ERROR("server.loading", "HabilidadesRandom: versión de esquema no compatible {}.", currentVersion);
+        return false;
     }
     auto transaction = std::make_shared<TransactionBase>();
     for (auto const& entry : HRSchema::Pool)

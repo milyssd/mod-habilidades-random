@@ -4,7 +4,7 @@
 #include <string_view>
 namespace HRSchema
 {
-inline constexpr unsigned Version = 1;
+inline constexpr unsigned Version = 2;
 inline constexpr std::string_view Statements[] = {
     R"HRSQL(CREATE TABLE IF NOT EXISTS `mod_habilidades_random_stats` (
  `player_id` INT UNSIGNED NOT NULL,
@@ -43,7 +43,20 @@ inline constexpr std::string_view Statements[] = {
   PRIMARY KEY (`player_id`,`kind`,`spell_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4)HRSQL",
     R"HRSQL(CREATE TABLE IF NOT EXISTS mod_habilidades_random_meta (id TINYINT UNSIGNED PRIMARY KEY, version INT UNSIGNED NOT NULL))HRSQL",
-    R"HRSQL(CREATE TABLE IF NOT EXISTS mod_habilidades_random_npcs (id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,map_id INT UNSIGNED NOT NULL,x FLOAT NOT NULL,y FLOAT NOT NULL,z FLOAT NOT NULL,o FLOAT NOT NULL))HRSQL"
+    R"HRSQL(CREATE TABLE IF NOT EXISTS mod_habilidades_random_npcs (id INT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,map_id INT UNSIGNED NOT NULL,x FLOAT NOT NULL,y FLOAT NOT NULL,z FLOAT NOT NULL,o FLOAT NOT NULL))HRSQL",
+    R"HRSQL(CREATE TABLE IF NOT EXISTS `mod_habilidades_random_skill_snapshot_meta` (
+  `player_id` INT UNSIGNED NOT NULL,
+  `skill_count` INT UNSIGNED NOT NULL,
+  PRIMARY KEY (`player_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4)HRSQL",
+    R"HRSQL(CREATE TABLE IF NOT EXISTS `mod_habilidades_random_skill_snapshot` (
+  `player_id` INT UNSIGNED NOT NULL,
+  `skill_id` SMALLINT UNSIGNED NOT NULL,
+  `skill_step` SMALLINT UNSIGNED NOT NULL,
+  `skill_value` SMALLINT UNSIGNED NOT NULL,
+  `skill_max` SMALLINT UNSIGNED NOT NULL,
+  PRIMARY KEY (`player_id`,`skill_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4)HRSQL"
 };
 struct PoolEntry { unsigned id; unsigned rarity; };
 inline constexpr PoolEntry Pool[] = {

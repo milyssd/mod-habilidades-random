@@ -52,7 +52,7 @@ bool HRRuntime::Prepare()
     if (Prepared)
         return true;
 #ifndef ACORE_RUNTIME_MODULE_DATA
-    LOG_ERROR("server.loading", "HabilidadesRandom: aplicar patches/azerothcore-runtime-data.patch y recompilar el core. No se escribirá en world.");
+    LOG_ERROR("server.loading", "HabilidadesRandom: ejecutar python modules/mod-habilidades-random/tools/prepare_core.py --core . desde la raíz del core y recompilar. No se escribirá en world.");
     return false;
 #else
     // Register only absent pairs. Native druid data and every existing player profile stay untouched.

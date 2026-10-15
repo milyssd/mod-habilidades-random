@@ -16,8 +16,9 @@ command = [args.client, '--no-defaults', '--socket=' + args.socket, '-u', 'root'
 header = (root / 'src/HRDatabaseSchema.h').read_text()
 statements = re.findall(r'R"HRSQL\((.*?)\)HRSQL"', header, re.S)
 rows = re.findall(r'^    \{(\d+), (\d+)\}', header, re.M)
+version = int(re.search(r'inline constexpr unsigned Version = (\d+);', header)[1])
 assert len(rows) == 474 and len({r[0] for r in rows}) == 474
-assert len(statements) == 8
+assert len(statements) == 10 and version == 2
 
 
 def sql(statement, selected=True, success=True):
@@ -36,7 +37,10 @@ def bootstrap():
     if sql('SELECT COUNT(*) FROM mod_habilidades_random_meta WHERE id=1') == '0':
         seed = ','.join('(' + i + ',' + r + ')' for i, r in rows)
         sql('START TRANSACTION; INSERT IGNORE INTO mod_habilidades_random_spell_rarity VALUES ' + seed +
-            '; INSERT INTO mod_habilidades_random_meta VALUES (1,1); COMMIT;')
+            '; INSERT INTO mod_habilidades_random_meta VALUES (1,' + str(version) + '); COMMIT;')
+    elif sql('SELECT version FROM mod_habilidades_random_meta WHERE id=1') == '1':
+        sql('UPDATE mod_habilidades_random_meta SET version=' + str(version) + ' WHERE id=1 AND version=1')
+    assert sql('SELECT version FROM mod_habilidades_random_meta WHERE id=1') == str(version)
 
 
 sql('CREATE DATABASE `' + database + '`;', selected=False)
@@ -56,6 +60,55 @@ try:
     assert sql('SELECT COUNT(*) FROM mod_habilidades_random_spell_rarity') == '473'
     assert sql('SELECT COUNT(*) FROM mod_habilidades_random_snapshot') == '4'
     assert sql('SELECT original_class,original_spec,original_specs FROM mod_habilidades_random_event') == '1\t1\t2'
+    # A v1 database gains only new tables/version. Existing characters and pool
+    # edits survive, without pretending their historical skill values are known.
+    sql('''DROP TABLE mod_habilidades_random_skill_snapshot;
+        DROP TABLE mod_habilidades_random_skill_snapshot_meta;
+        UPDATE mod_habilidades_random_meta SET version=1 WHERE id=1;''')
+    bootstrap()
+    assert sql('SELECT version FROM mod_habilidades_random_meta WHERE id=1') == '2'
+    assert sql('SELECT COUNT(*) FROM mod_habilidades_random_spell_rarity') == '473'
+    assert sql('SELECT COUNT(*) FROM mod_habilidades_random_snapshot WHERE player_id=1') == '4'
+    assert sql('SELECT original_class,original_spec,original_specs FROM mod_habilidades_random_event WHERE player_id=1') == '1\t1\t2'
+    assert sql('SELECT COUNT(*) FROM mod_habilidades_random_skill_snapshot_meta WHERE player_id=1') == '0'
+    assert sql('SELECT COUNT(*) FROM mod_habilidades_random_skill_snapshot') == '0'
+    # New enrollments commit skill values, cap and rank with the original event
+    # and spell snapshot. A header also records a valid empty snapshot.
+    sql('''START TRANSACTION;
+        INSERT INTO mod_habilidades_random_event
+        (player_id,original_class,spell_count,talent_count) VALUES (2,1,1,0),(3,11,0,0);
+        INSERT INTO mod_habilidades_random_snapshot VALUES (2,201,3,0);
+        INSERT INTO mod_habilidades_random_skill_snapshot_meta VALUES (2,2),(3,0);
+        INSERT INTO mod_habilidades_random_skill_snapshot VALUES
+        (2,43,0,137,150),(2,45,0,120,150);
+        COMMIT;''')
+    bootstrap()
+    assert sql('SELECT skill_id,skill_step,skill_value,skill_max FROM mod_habilidades_random_skill_snapshot '
+               'WHERE player_id=2 ORDER BY skill_id') == '43\t0\t137\t150\n45\t0\t120\t150'
+    assert sql('''SELECT m.skill_count,COUNT(s.skill_id) FROM mod_habilidades_random_skill_snapshot_meta m
+        LEFT JOIN mod_habilidades_random_skill_snapshot s USING(player_id) WHERE m.player_id=2
+        GROUP BY m.player_id,m.skill_count''') == '2\t2'
+    assert sql('SELECT skill_count FROM mod_habilidades_random_skill_snapshot_meta WHERE player_id=3') == '0'
+    assert sql('SELECT COUNT(*) FROM mod_habilidades_random_skill_snapshot WHERE player_id=3') == '0'
+    # A missing row must be detectable rather than mistaken for an empty copy.
+    assert sql('''START TRANSACTION;
+        DELETE FROM mod_habilidades_random_skill_snapshot WHERE player_id=2 AND skill_id=45;
+        SELECT m.skill_count<>COUNT(s.skill_id) FROM mod_habilidades_random_skill_snapshot_meta m
+        LEFT JOIN mod_habilidades_random_skill_snapshot s USING(player_id) WHERE m.player_id=2
+        GROUP BY m.player_id,m.skill_count;
+        ROLLBACK;''') == '1'
+    sql('''START TRANSACTION;
+        INSERT INTO mod_habilidades_random_event
+        (player_id,original_class,spell_count,talent_count) VALUES (4,1,1,0);
+        INSERT INTO mod_habilidades_random_snapshot VALUES (4,201,3,0);
+        INSERT INTO mod_habilidades_random_skill_snapshot_meta VALUES (4,1);
+        INSERT INTO mod_habilidades_random_skill_snapshot VALUES (4,43,0,137,150);
+        INSERT INTO nonexistent_hr_failure_table VALUES (4);
+        COMMIT;''', success=False)
+    for table in ('event', 'snapshot', 'skill_snapshot_meta', 'skill_snapshot'):
+        assert sql('SELECT COUNT(*) FROM mod_habilidades_random_' + table + ' WHERE player_id=4') == '0'
+    assert sql('SELECT skill_value,skill_max FROM mod_habilidades_random_skill_snapshot WHERE player_id=2 AND skill_id=43') == '137\t150'
+    print('PASS: additive v1 migration, unknown legacy skills, valid empty snapshots, integrity counts and atomic enrollment rollback')
     sql('''START TRANSACTION;
         UPDATE mod_habilidades_random_stats SET bans=4 WHERE player_id=1;
         INSERT INTO mod_habilidades_random_bans VALUES (1,100);
@@ -81,6 +134,7 @@ try:
     sql('UPDATE mod_habilidades_random_event SET character_pending=0 WHERE player_id=1 AND revision=2')
     assert sql('SELECT completed,character_pending FROM mod_habilidades_random_event WHERE player_id=1') == '1\t0'
     assert sql('SELECT COUNT(*) FROM mod_habilidades_random_snapshot WHERE player_id=1') == '4'
+    assert sql('SELECT skill_value,skill_max FROM mod_habilidades_random_skill_snapshot WHERE player_id=2 AND skill_id=43') == '137\t150'
     # NPC positions also belong exclusively to the module database.
     sql('INSERT INTO mod_habilidades_random_npcs (map_id,x,y,z,o) VALUES (0,1,2,3,0)')
     bootstrap()

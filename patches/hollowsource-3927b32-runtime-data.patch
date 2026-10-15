@@ -1,0 +1,92 @@
+diff --git a/src/server/game/Globals/ObjectMgr.cpp b/src/server/game/Globals/ObjectMgr.cpp
+index b934ffa..02f3c22 100644
+--- a/src/server/game/Globals/ObjectMgr.cpp
++++ b/src/server/game/Globals/ObjectMgr.cpp
+@@ -53,6 +53,7 @@
+ #include "Vehicle.h"
+ #include "World.h"
+ #include <boost/algorithm/string.hpp>
++#include <algorithm>
+ #include <numeric>
+ 
+ #include "ItemEnchantmentMgr.h"
+@@ -11095,6 +11096,45 @@ VehicleAccessoryList const* ObjectMgr::GetVehicleAccessoryList(Vehicle* veh) con
+     return nullptr;
+ }
+ 
++bool ObjectMgr::RegisterRuntimePlayerInfo(uint32 race, uint32 classId, PlayerInfo const& source,
++    std::vector<PlayerLevelInfo> const& levels)
++{
++    uint32 maxLevel = sWorld->getIntConfig(CONFIG_MAX_PLAYER_LEVEL);
++    if (!maxLevel || !race || !classId || race >= _playerInfo.size() || classId >= _playerInfo[race].size() ||
++        _playerInfo[race][classId] || !source.displayId_m || !source.displayId_f || levels.size() != maxLevel)
++        return false;
++
++    auto info = std::make_unique<PlayerInfo>(source);
++    info->levelInfo = nullptr;
++    auto levelData = std::make_unique<PlayerLevelInfo[]>(maxLevel);
++    std::copy(levels.begin(), levels.end(), levelData.get());
++    // Match ObjectMgr::~ObjectMgr ownership: one PlayerInfo and one independent levelInfo array.
++    info->levelInfo = levelData.release();
++    _playerInfo[race][classId] = info.release();
++    return true;
++}
++
++bool ObjectMgr::RegisterRuntimeCreatureTemplate(CreatureTemplate const& source)
++{
++    // Bound allocations, reject collisions and validate every model before registering anything.
++    if (!source.Entry || source.Entry > 1000000 || _creatureTemplateStore.count(source.Entry) || source.Models.empty())
++        return false;
++    for (CreatureModel const& model : source.Models)
++        if (!sCreatureDisplayInfoStore.LookupEntry(model.CreatureDisplayID) ||
++            !GetCreatureModelInfo(model.CreatureDisplayID))
++            return false;
++
++    // Allocate the fast index first; unordered_map rehash keeps element pointers valid.
++    if (_creatureTemplateStoreFast.size() <= source.Entry)
++        _creatureTemplateStoreFast.resize(source.Entry + 1, nullptr);
++    auto [itr, inserted] = _creatureTemplateStore.emplace(source.Entry, source);
++    if (!inserted)
++        return false;
++    _creatureTemplateStoreFast[source.Entry] = &itr->second;
++    itr->second.InitializeQueryData();
++    return true;
++}
++
+ PlayerInfo const* ObjectMgr::GetPlayerInfo(uint32 race, uint32 class_) const
+ {
+     if (race >= sRaceMgr->GetMaxRaces())
+diff --git a/src/server/game/Globals/ObjectMgr.h b/src/server/game/Globals/ObjectMgr.h
+index 8a89fc3..2497403 100644
+--- a/src/server/game/Globals/ObjectMgr.h
++++ b/src/server/game/Globals/ObjectMgr.h
+@@ -18,6 +18,9 @@
+ #ifndef _OBJECTMGR_H
+ #define _OBJECTMGR_H
+ 
++// Startup-only module data registration API.
++#define ACORE_RUNTIME_MODULE_DATA 1
++
+ #include "AhoCorasick.h"
+ #include "Bag.h"
+ #include "ConditionMgr.h"
+@@ -41,6 +44,7 @@
+ #include <map>
+ #include <memory>
+ #include <string>
++#include <vector>
+ 
+ class Item;
+ struct DungeonProgressionRequirements;
+@@ -810,6 +814,11 @@ public:
+     }
+     void GetPlayerClassLevelInfo(uint32 class_, uint8 level, PlayerClassLevelInfo* info) const;
+ 
++    // Call after normal data loads and before accepting players; never writes to world DB.
++    bool RegisterRuntimePlayerInfo(uint32 race, uint32 classId, PlayerInfo const& source,
++        std::vector<PlayerLevelInfo> const& levels);
++    bool RegisterRuntimeCreatureTemplate(CreatureTemplate const& source);
++
+     [[nodiscard]] PlayerInfo const* GetPlayerInfo(uint32 race, uint32 class_) const;
+ 
+     void GetPlayerLevelInfo(uint32 race, uint32 class_, uint8 level, PlayerLevelInfo* info) const;
