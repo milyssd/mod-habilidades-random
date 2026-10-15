@@ -6,6 +6,7 @@
 #include "AllCreatureScript.h"
 #include "CommandScript.h"
 #include "Config.h"
+#include "Log.h"
 #include "RBAC.h"
 #include "World.h"
 #include "AccountScript.h"
@@ -38,17 +39,48 @@ class HRWorld : public WorldScript
 {
 public:
     HRWorld() : WorldScript("HabilidadesRandomWorld") { }
-    void OnAfterConfigLoad(bool) override { sHabilidadesRandomMgr->LoadConfig(); }
+    void OnAfterConfigLoad(bool reload) override
+    {
+        sHabilidadesRandomMgr->LoadConfig();
+        if (reload && sConfigMgr->GetOption<bool>("HabilidadesRandom.Enable", true) &&
+            (!_storageReady || !_profilesReady || !_npcReady))
+            LOG_INFO("server.loading", "HabilidadesRandom: reinicia worldserver para activar el evento tras corregir su configuración o sus parches.");
+    }
     void OnBeforeWorldInitialized() override
     {
-        // These world hooks are available on cores without module database lifecycle hooks.
-        if (!HRDatabaseStore.Open(sConfigMgr->GetOption<std::string>("HabilidadesRandom.DatabaseInfo", ""),
-                sConfigMgr->GetOption<std::string>("HabilidadesRandom.DatabaseName", "mod_habilidades_random")) ||
-            !HRRuntime::Prepare())
-            World::StopNow(ERROR_EXIT_CODE);
+        _storageReady = false;
+        _npcReady = false;
+        // Profiles are memory-only and keep converted races visible for recovery.
+        _profilesReady = HRRuntime::PrepareProfiles();
+        if (!sConfigMgr->GetOption<bool>("HabilidadesRandom.Enable", true))
+        {
+            sHabilidadesRandomMgr->SetAvailability(false, _profilesReady, false);
+            LOG_INFO("server.loading", "HabilidadesRandom: desactivado; no se abre la base privada ni se crean NPC.");
+            return;
+        }
+        if (!_profilesReady)
+        {
+            sHabilidadesRandomMgr->SetAvailability(false, false, false);
+            LOG_ERROR("server.loading", "HabilidadesRandom: perfiles no disponibles; comprueba datos y parches. El evento queda inactivo y worldserver continúa. Desde la raíz del core ejecuta python modules/mod-habilidades-random/tools/prepare_core.py --core . y recompila.");
+            return;
+        }
+        _storageReady = HRDatabaseStore.Open(sConfigMgr->GetOption<std::string>("HabilidadesRandom.DatabaseInfo", ""),
+            sConfigMgr->GetOption<std::string>("HabilidadesRandom.DatabaseName", "mod_habilidades_random"));
+        if (!_storageReady)
+        {
+            sHabilidadesRandomMgr->SetAvailability(false, _profilesReady, false);
+            LOG_ERROR("server.loading", "HabilidadesRandom: base privada no disponible. El evento queda inactivo y worldserver continúa.");
+            return;
+        }
+        _npcReady = HRRuntime::Prepare();
+        sHabilidadesRandomMgr->SetAvailability(_storageReady, _profilesReady, _npcReady);
+        if (!_npcReady)
+            LOG_ERROR("server.loading", "HabilidadesRandom: NPC no disponible; inscripciones cerradas. Se conserva la recuperación de participantes y worldserver continúa.");
     }
     void OnUpdate(uint32 diff) override
     {
+        if (!HRDatabaseStore.IsOpen())
+            return;
         if (diff < _keepAliveTimer)
         {
             _keepAliveTimer -= diff;
@@ -62,13 +94,20 @@ public:
         // Wait until player/map callbacks have stopped, then close our own connection.
         HRCloseCharacterSave();
         HRDatabaseStore.Close();
+        sHabilidadesRandomMgr->SetAvailability(false, false, false);
     }
     void OnStartup() override
     {
+        if (!_storageReady || !_profilesReady)
+            return;
         sHabilidadesRandomMgr->Initialize();
-        HRRuntime::LoadNpcs();
+        if (sHabilidadesRandomMgr->IsEnabled())
+            HRRuntime::LoadNpcs();
     }
 private:
+    bool _storageReady = false;
+    bool _profilesReady = false;
+    bool _npcReady = false;
     uint32 _keepAliveTimer = 60000;
 };
 

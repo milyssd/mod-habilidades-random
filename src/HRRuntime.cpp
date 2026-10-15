@@ -22,6 +22,7 @@ namespace
 {
 std::recursive_mutex RuntimeMutex;
 uint32 NpcEntry = 900100;
+bool ProfilesPrepared = false;
 bool Prepared = false;
 // Creature GUID counters are local to each map: GUID alone is not a unique spawn key.
 std::map<std::pair<uint32, ObjectGuid>, uint32> Spawns;
@@ -49,13 +50,12 @@ bool Spawn(uint32 rowId, uint32 mapId, Position const& position)
 }
 }
 
-bool HRRuntime::Prepare()
+bool HRRuntime::PrepareProfiles()
 {
     std::lock_guard<std::recursive_mutex> lock(RuntimeMutex);
-    if (Prepared)
+    if (ProfilesPrepared)
         return true;
 #if !defined(ACORE_RUNTIME_MODULE_DATA) || !defined(ACORE_MODULE_SAVE_GUARD)
-    LOG_ERROR("server.loading", "HabilidadesRandom: ejecutar python modules/mod-habilidades-random/tools/prepare_core.py --core . desde la raíz del core y recompilar. No se escribirá en world.");
     return false;
 #else
     // Register only absent pairs. Native druid data and every existing player profile stay untouched.
@@ -107,6 +107,24 @@ bool HRRuntime::Prepare()
             return false;
         EventOnlyDruidRaces.insert(race);
     }
+    ProfilesPrepared = true;
+    return true;
+#endif
+}
+
+bool HRRuntime::Prepare()
+{
+    std::lock_guard<std::recursive_mutex> lock(RuntimeMutex);
+    if (Prepared)
+        return true;
+    if (!PrepareProfiles())
+    {
+        LOG_ERROR("server.loading", "HabilidadesRandom: perfiles de recuperación no disponibles; comprobar datos de raza/clase y ejecutar python modules/mod-habilidades-random/tools/prepare_core.py --core . desde la raíz del core y recompilar.");
+        return false;
+    }
+#if !defined(ACORE_RUNTIME_MODULE_DATA) || !defined(ACORE_MODULE_SAVE_GUARD)
+    return false;
+#else
     NpcEntry = sConfigMgr->GetOption<uint32>("HabilidadesRandom.NpcEntry", 900100);
     CreatureTemplate const* source = sObjectMgr->GetCreatureTemplate(68);
     if (!source || sObjectMgr->GetCreatureTemplate(NpcEntry))

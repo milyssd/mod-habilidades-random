@@ -1,9 +1,11 @@
-# Validación de 2.2.0-dev
+# Validación de 2.2.1-dev
 
 Destino: carpeta `src/server` del `server.zip` recibido del usuario, atribuida por él a `yafeth950-test/hollowsource` `3927b32566d2910b332decb4fa97e3a2e0879b40`. El ZIP no permite verificar ese hash Git. Para las comprobaciones C++ se emplean sus encabezados reales y `src/common`/dependencias de AzerothCore `9eabf314a27b71d4e9cd513f6f2c08befe90d4ef`, porque esas carpetas no estaban incluidas.
 
 ## Correcciones revisadas
 
+- Arranque sin `World::StopNow`: Enable=0 no abre DB ni crea NPC; los fallos del evento cierran inscripciones y mantienen el servidor funcionando. La preparación de perfiles no depende del NPC.
+- Disponibilidad separada para conexión, perfiles, NPC e índice de inscripciones. Personajes ajenos y completados restaurados no consultan la base; los fallos no provocan una desconexión global. La desactivación en caliente conserva la recuperación disponible.
 - Configuración en español organizada por evento, NPC, elecciones, cambios/bloqueos, rarezas y base propia. Se conservan las claves anteriores y la conexión automática sin repetir credenciales.
 - Restauración de talentos usando las máscaras reales de ambas especializaciones, en lugar de `HasTalent`, que ignora el argumento de especialización en el fork.
 - Guardados del evento y del personaje con START, operaciones y COMMIT comprobados. No se reconecta para repetir una consulta dentro de una transacción. La conexión de personajes ejecuta el guardado generado por las API y las sentencias preparadas del core; no instala SQL ni tablas del módulo en sus bases.
@@ -28,6 +30,7 @@ Destino: carpeta `src/server` del `server.zip` recibido del usuario, atribuida p
 - Helper de preparación: aplicación de ambas variantes, modo de comprobación, repetición sin cambios, firma/aplicación parcial, rutas con espacios y errores de Git/core. Parche específico comprobado sobre copias de los ObjectMgr completos del ZIP.
 - Actualización de un core con el parche runtime anterior: el helper añade la protección de guardado faltante y comprueba todos los parches antes de aplicar alguno. Sus guardas extraídas del parche se compilan y ejecutan con dobles de oro/inventario y rollback.
 - Recuperación: se compila el cuerpo real de `RequireRecovery` con dobles de Player/sesión. La regresión reproduce el fallo de oro sin objeto cuando no se activa la protección, y comprueba rollback, confirmación perdida y bloqueo antes de cerrar. Estas pruebas no ejecutan el proceso de logout del servidor completo.
+- Arranque: se compilan los cuerpos reales de HRWorld, Initialize, OnLogin y disponibilidad con dobles del core. Cuarenta escenarios cubren desactivación fría/caliente, fallos de DB/perfiles/NPC/pool/índice, registro incompleto, ausencia de consultas y expulsiones para personajes ajenos, inscripción incierta y recuperación de participantes. No es un `--dry-run` de worldserver.
 - Recopilador: exclusión de configuración/enlaces y protección de archivos existentes.
 - Aislamiento: no hay directorios de importación SQL ni consultas raw del módulo a los pools CharacterDatabase/WorldDatabase. Los únicos cambios de personaje se realizan mediante las API habituales del core.
 
@@ -43,3 +46,5 @@ Las seis unidades C++ del módulo, `ObjectMgr.cpp` y `PlayerStorage.cpp` del for
 - Validar requisitos de armas, formas, posturas, mascotas y la pool; medir latencia de las transacciones síncronas bajo carga.
 
 No se certifica el funcionamiento integral en WoW. Es una versión de desarrollo con verificaciones de código y componentes, pendiente de las pruebas del servidor y cliente reales.
+
+Una base que nunca se abrió en un arranque deshabilitado no permite identificar conversiones de razas normalmente druida. La recuperación completa requiere volver a activar con la base y los parches disponibles; no se inventa una clase original ni una copia a partir del personaje convertido.

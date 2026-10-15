@@ -53,16 +53,25 @@ struct HRPlayerState
     std::chrono::steady_clock::time_point lastRequest{};
 };
 
+struct HREventRegistration
+{
+    bool completed = false;
+    bool characterPending = false;
+    uint8 originalClass = 0;
+};
+
 class HabilidadesRandomMgr
 {
 public:
     static HabilidadesRandomMgr* instance();
     void LoadConfig();
     void Initialize();
+    void SetAvailability(bool storageReady, bool profilesReady, bool npcReady);
+    bool CanRecover() const;
     bool IsEnabled() const
     {
         std::lock_guard<std::recursive_mutex> lock(_mutex);
-        return _enabled && _ready;
+        return _enabled && _ready && CanRecover() && _npcReady;
     }
     bool IsParticipant(Player const* player) const;
     bool TalentsLocked(Player const* player) const;
@@ -106,6 +115,10 @@ private:
     mutable std::recursive_mutex _mutex;
     bool _enabled = true;
     bool _ready = false;
+    bool _storageReady = false;
+    bool _profilesReady = false;
+    bool _npcReady = false;
+    bool _registryReady = false;
     bool _includeBroken = false;
     void ChangeClass(Player* player, uint8 classId);
     bool Eligible(uint32 id, Player const* player) const;
@@ -120,6 +133,7 @@ private:
     std::unordered_map<uint32, uint8> _rarities;
     std::unordered_set<uint32> _protected;
     std::unordered_map<uint32, HRPlayerState> _players;
+    std::unordered_map<uint32, HREventRegistration> _registrations;
     std::unordered_set<uint32> _recoveryRequired;
 };
 

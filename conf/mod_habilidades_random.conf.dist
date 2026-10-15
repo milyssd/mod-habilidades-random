@@ -18,8 +18,10 @@
 # 1. EVENTO
 #==============================================================================
 
-# 1 = permitir inscripciones. 0 = cerrar el evento y restaurar participantes
-# cuando estén vivos, fuera de combate y sin teletransportarse.
+# 1 = activar el evento. Al arrancar con 0 no se abre su base ni se crean NPC.
+# Si se cambia a 0 con el evento ya funcionando, se cierran las inscripciones
+# y se restauran participantes cuando sea seguro, usando la conexión existente.
+# Para volver a activar tras un arranque con 0, reinicia worldserver.
 HabilidadesRandom.Enable = 1
 
 # Bloquear el aprendizaje normal de hechizos de clase durante el desafío.

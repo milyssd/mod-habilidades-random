@@ -15,9 +15,14 @@ constexpr uint32 CLASS_DRUID = 11, CLASS_DEATH_KNIGHT = 6, MAX_CLASSES = 12, MAX
 constexpr uint32 CONFIG_MAX_PLAYER_LEVEL = 0, UNIT_NPC_FLAG_GOSSIP = 1;
 constexpr uint32 CREATURE_FLAG_EXTRA_CIVILIAN = 1, CREATURE_FLAG_EXTRA_CANNOT_ENTER_COMBAT = 2;
 constexpr uint32 UNIT_FLAG_IMMUNE_TO_PC = 256, UNIT_FLAG_IMMUNE_TO_NPC = 512;
+#ifndef HR_TEST_NO_RUNTIME_API
 #define ACORE_RUNTIME_MODULE_DATA 1
+#endif
+#ifndef HR_TEST_NO_SAVE_GUARD
 #define ACORE_MODULE_SAVE_GUARD 1
-#define LOG_ERROR(...) ((void)0)
+#endif
+inline uint32 TestErrors = 0;
+#define LOG_ERROR(...) (++TestErrors)
 
 struct ObjectGuid
 {

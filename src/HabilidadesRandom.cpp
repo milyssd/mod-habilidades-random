@@ -77,9 +77,38 @@ void HabilidadesRandomMgr::LoadConfig()
 void HabilidadesRandomMgr::Initialize()
 {
     std::lock_guard<std::recursive_mutex> lock(_mutex);
-    LoadConfig();
     _ready = false;
     _rarities.clear();
+    if (!_storageReady || !_profilesReady)
+        return;
+    // Index only event identities, not every character's full backup. A failed
+    // index closes enrollment/recovery without turning ordinary logins into DB
+    // queries or disconnecting characters that never entered the challenge.
+    // Retain previous identities on failure so already known participants can
+    // still be isolated safely; never discard a loaded live player state here.
+    _registryReady = false;
+    auto count = HRDatabaseStore.Query("SELECT COUNT(*) FROM mod_habilidades_random_event");
+    if (!count)
+    {
+        LOG_ERROR("server.loading", "HabilidadesRandom: no se pudo cargar el registro del evento; el módulo queda inactivo.");
+        return;
+    }
+    uint64 expected = count->Fetch()[0].Get<uint64>();
+    auto registrations = HRDatabaseStore.Query("SELECT player_id,completed,character_pending,original_class FROM mod_habilidades_random_event");
+    std::unordered_map<uint32, HREventRegistration> loaded;
+    if (registrations)
+        do
+        {
+            Field* fields = registrations->Fetch();
+            loaded[fields[0].Get<uint32>()] = {fields[1].Get<bool>(), fields[2].Get<bool>(), fields[3].Get<uint8>()};
+        } while (registrations->NextRow());
+    if (loaded.size() != expected)
+    {
+        LOG_ERROR("server.loading", "HabilidadesRandom: registro del evento incompleto; el módulo queda inactivo.");
+        return;
+    }
+    _registrations.swap(loaded);
+    _registryReady = true;
     // A failed/empty pool must never cause a destructive spell cleanup.
     QueryResult schema = HRDatabaseStore.Query("SELECT COUNT(*) FROM information_schema.tables WHERE "
         "table_schema=DATABASE() AND table_name IN ('mod_habilidades_random_stats',"
@@ -109,6 +138,20 @@ void HabilidadesRandomMgr::Initialize()
     } while (result->NextRow());
     _ready = !_rarities.empty();
     LOG_INFO("server.loading", "HabilidadesRandom: {} cadenas válidas; evento por inscripción en NPC.", _rarities.size());
+}
+
+void HabilidadesRandomMgr::SetAvailability(bool storageReady, bool profilesReady, bool npcReady)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    _storageReady = storageReady;
+    _profilesReady = profilesReady;
+    _npcReady = npcReady;
+}
+
+bool HabilidadesRandomMgr::CanRecover() const
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    return _storageReady && _profilesReady && _registryReady;
 }
 
 uint32 HabilidadesRandomMgr::Root(uint32 id) const
@@ -190,6 +233,7 @@ bool HabilidadesRandomMgr::LoadPlayer(Player* player)
     state.completionLevel = f[9].Get<uint8>();
     state.runesInitialized = player->getClass() == CLASS_DEATH_KNIGHT;
     state.originalClass = f[1].Get<uint8>();
+    _registrations[guid] = {state.completed, state.characterPending, state.originalClass};
     state.originalSpec = f[2].Get<uint8>();
     state.originalSpecs = f[3].Get<uint8>();
     uint32 spells = f[4].Get<uint32>(), talents = f[5].Get<uint32>();
@@ -356,6 +400,11 @@ bool HabilidadesRandomMgr::Save(Player* player, HRPlayerState& state, bool saveP
 {
     if (_recoveryRequired.count(Guid(player)))
         return false;
+    if (!CanRecover())
+    {
+        RequireRecovery(player);
+        return false;
+    }
     auto transaction = std::make_shared<HRTransaction>();
     std::string guid = std::to_string(Guid(player));
     HRStats const& s = state.stats;
@@ -386,6 +435,7 @@ bool HabilidadesRandomMgr::Save(Player* player, HRPlayerState& state, bool saveP
     }
     state.revision = revision;
     state.characterPending = pending;
+    _registrations[Guid(player)] = {state.completed, state.characterPending, state.originalClass};
     if (savePlayer && SaveCharacter(player))
     {
         if (HRDatabaseStore.Execute("UPDATE mod_habilidades_random_event SET character_pending=0 WHERE player_id=" +
@@ -403,6 +453,7 @@ bool HabilidadesRandomMgr::Save(Player* player, HRPlayerState& state, bool saveP
         Notice(player, _recoveryRequired.count(Guid(player)) ?
             "[Desafío] Progreso protegido en la base del evento. Vuelve a conectar para completar la recuperación." :
             "[Desafío] Progreso protegido en la base del evento. El guardado del personaje se reintentará automáticamente.");
+    _registrations[Guid(player)] = {state.completed, state.characterPending, state.originalClass};
     return true;
 }
 
@@ -419,7 +470,7 @@ void HabilidadesRandomMgr::RequireRecovery(Player* player)
     // copy; the next login reads whichever transaction actually committed.
     _recoveryRequired.insert(Guid(player));
     Close(player);
-    player->GetSession()->KickPlayer(std::string("HabilidadesRandom: guardado sin confirmar; vuelve a conectar para recuperar el progreso"));
+    player->GetSession()->KickPlayer(std::string("HabilidadesRandom: recuperación pendiente; revisa la base del evento y vuelve a conectar"));
 }
 
 void HabilidadesRandomMgr::ChangeClass(Player* player, uint8 classId)
@@ -556,6 +607,9 @@ bool HabilidadesRandomMgr::Join(Player* player)
         std::to_string(state.stats.bans) + ',' + std::to_string(state.stats.lastLevel) + ") ON DUPLICATE KEY UPDATE "
         "successful_drafts=0,total_expected_drafts=VALUES(total_expected_drafts),rerolls=VALUES(rerolls),bans=VALUES(bans),"
         "offered_spell_1=0,offered_spell_2=0,offered_spell_3=0,last_level=VALUES(last_level)");
+    // COMMIT can succeed even if its acknowledgement is lost. Keep the identity
+    // before attempting it so a later login checks for that possible backup.
+    _registrations[Guid(player)] = {false, true, state.originalClass};
     if (!HRDatabaseStore.Commit(transaction))
     {
         Notice(player, "[Desafío] No se pudo guardar la copia. Tu personaje no ha sido modificado.");
@@ -634,6 +688,11 @@ bool HabilidadesRandomMgr::Restore(Player* player)
     auto itr = _players.find(Guid(player));
     if (itr == _players.end() || itr->second.completed)
         return false;
+    if (!CanRecover())
+    {
+        RequireRecovery(player);
+        return false;
+    }
     if (!player->IsAlive() || player->IsInCombat() || player->IsBeingTeleported())
         return false; // Retried automatically after combat/resurrection/teleport.
     auto& state = itr->second;
@@ -746,38 +805,62 @@ bool HabilidadesRandomMgr::Restore(Player* player)
 void HabilidadesRandomMgr::OnLogin(Player* player)
 {
     std::lock_guard<std::recursive_mutex> lock(_mutex);
-    _recoveryRequired.erase(Guid(player));
-    // A failed query is not evidence that the character never enrolled.
+    uint32 guid = Guid(player);
+    _recoveryRequired.erase(guid);
+    auto registration = _registrations.find(guid);
+    bool eventOnlyDruid = player->getClass() == CLASS_DRUID && HRRuntime::IsEventOnlyDruidRace(player->getRace());
+    if (registration != _registrations.end() && registration->second.completed &&
+        !registration->second.characterPending && player->getClass() == registration->second.originalClass)
+        return;
+    if (!CanRecover())
+    {
+        // With cold-start Enable=0 no DB is opened and identities are unknown.
+        // Only a confirmed event identity or a synthetic race/druid combination
+        // can be isolated; an outage must never reject unrelated players.
+        if (registration != _registrations.end() || eventOnlyDruid)
+            RequireRecovery(player);
+        return;
+    }
+    if (registration == _registrations.end())
+    {
+        if (eventOnlyDruid)
+            RequireRecovery(player);
+        return;
+    }
+    // Only confirmed identities (including uncertain enrollment commits) need
+    // a backup query. A failed query cannot turn one into a nonparticipant.
     auto count = HRDatabaseStore.Query("SELECT COUNT(*) FROM mod_habilidades_random_event WHERE player_id=" +
-        std::to_string(Guid(player)));
+        std::to_string(guid));
     if (!count)
     {
-        player->GetSession()->KickPlayer(std::string("HabilidadesRandom: base privada inaccesible; reintentar conexión"));
+        RequireRecovery(player);
         return;
     }
     if (!count->Fetch()[0].Get<uint32>())
     {
-        if (player->getClass() == CLASS_DRUID && HRRuntime::IsEventOnlyDruidRace(player->getRace()))
-            player->GetSession()->KickPlayer(std::string("HabilidadesRandom: falta la copia de esta conversión; revisar la base configurada"));
+        _registrations.erase(guid);
+        _players.erase(guid);
+        if (eventOnlyDruid)
+            RequireRecovery(player);
         return;
     }
     // Recovery remains available even if new enrollment is disabled or the pool fails.
     if (!LoadPlayer(player))
     {
-        player->GetSession()->KickPlayer(std::string("HabilidadesRandom: copia de seguridad incompleta; revisar datos antes de jugar"));
+        RequireRecovery(player);
         return;
     }
     auto& state = _players.at(Guid(player));
     if (state.completed)
     {
         // Replay a pending character save after either DB or process failed between the two commits.
-        if (!state.characterPending && (player->getClass() != CLASS_DRUID || state.originalClass == CLASS_DRUID))
+        if (!state.characterPending && player->getClass() == state.originalClass)
             return;
         state.completed = false;
         Restore(player);
         return;
     }
-    if (HRShouldRestore(true, state.completed, player->GetLevel()) || !_enabled || !_ready)
+    if (HRShouldRestore(true, state.completed, player->GetLevel()) || !IsEnabled())
     {
         Restore(player);
         return;
@@ -801,6 +884,12 @@ void HabilidadesRandomMgr::Update(Player* player, uint32 diff)
     auto itr = _players.find(Guid(player));
     if (itr == _players.end() || itr->second.transitioning)
         return;
+    if (!CanRecover())
+    {
+        if (!itr->second.completed || itr->second.characterPending)
+            RequireRecovery(player);
+        return;
+    }
     if (!itr->second.rejectedLearned.empty())
     {
         auto rejected = std::move(itr->second.rejectedLearned);
@@ -830,7 +919,7 @@ void HabilidadesRandomMgr::Update(Player* player, uint32 diff)
             Save(player, itr->second, true);
         return;
     }
-    if (HRShouldRestore(true, itr->second.completed, player->GetLevel()) || !_enabled || !_ready)
+    if (HRShouldRestore(true, itr->second.completed, player->GetLevel()) || !IsEnabled())
         Restore(player);
     else if (itr->second.characterPending)
         Save(player, itr->second, true);
@@ -863,7 +952,7 @@ void HabilidadesRandomMgr::OnLevelChanged(Player* player, uint8 /*oldLevel*/)
     auto itr = _players.find(Guid(player));
     if (itr == _players.end() || itr->second.completed || itr->second.transitioning)
         return;
-    if (HRShouldRestore(true, itr->second.completed, player->GetLevel()) || !_enabled || !_ready)
+    if (HRShouldRestore(true, itr->second.completed, player->GetLevel()) || !IsEnabled())
     {
         Restore(player);
         return;

@@ -22,7 +22,7 @@ class TestDatabase
 {
 public:
     bool open = true, failDelete = false;
-    uint32 nextId = 0;
+    uint32 nextId = 0, queries = 0, executions = 0;
     std::map<uint32, std::vector<TestField>> rows;
     bool IsOpen() const { return open; }
     bool ExecuteInsert(std::string const& sql, uint32& insertedId)
@@ -35,6 +35,7 @@ public:
     }
     bool Execute(std::string const& sql)
     {
+        ++executions;
         if (sql.rfind("INSERT INTO", 0) == 0)
         {
             uint32 mapId;
@@ -52,6 +53,7 @@ public:
     }
     std::shared_ptr<TestResult> Query(std::string const& sql)
     {
+        ++queries;
         auto result = std::make_shared<TestResult>();
         if (sql == "SELECT LAST_INSERT_ID()")
             result->rows = {{{double(nextId)}}};
@@ -69,6 +71,17 @@ inline TestDatabase TestDb;
 
 int main()
 {
+#if defined(HR_TEST_NO_RUNTIME_API) || defined(HR_TEST_NO_SAVE_GUARD)
+    assert(!HRRuntime::PrepareProfiles());
+    assert(!HRRuntime::PrepareProfiles());
+    assert(TestObjectMgr.profiles.empty() && TestObjectMgr.creatures.empty());
+    assert(!TestErrors && !TestDb.queries && !TestDb.executions);
+    assert(!HRRuntime::IsEventOnlyDruidRace(2));
+    assert(!HRRuntime::Prepare());
+    assert(TestErrors == 1 && !TestDb.queries && !TestDb.executions);
+    std::cout << "PASS: missing runtime/save API leaves profiles/NPC/storage untouched without profile errors\n";
+    return 0;
+#else
     std::array<PlayerLevelInfo, 2> baseline;
     for (uint32 race : {1u, 2u, 3u, 4u, 5u, 6u, 7u, 8u, 10u, 11u})
     {
@@ -78,7 +91,29 @@ int main()
         if (race == 1 || race == 4 || race == 6)
             TestObjectMgr.profiles[{race, CLASS_DRUID}] = profile;
     }
+    // Disabled startup needs only loadable converted characters: no private DB,
+    // NPC source template or event NPC registration is required for profiles.
+    TestDb.open = false;
+    assert(HRRuntime::PrepareProfiles());
+    auto const profilesCount = TestObjectMgr.profiles.size();
+    assert(HRRuntime::PrepareProfiles());
+    assert(TestObjectMgr.profiles.size() == profilesCount);
+    assert(TestObjectMgr.creatures.empty());
+    assert(!HRRuntime::PlaceNpc(nullptr));
+    HRRuntime::LoadNpcs();
+    assert(!TestDb.queries && !TestDb.executions);
+
     TestObjectMgr.creatures[68].Entry = 68;
+    TestObjectMgr.creatures[900100].Entry = 900100;
+    TestObjectMgr.creatures[900100].Name = "Existing NPC";
+    assert(!HRRuntime::Prepare());
+    assert(HRRuntime::PrepareProfiles()); // A blocked enrollment NPC cannot revoke recovery profiles.
+    assert(HRRuntime::IsEventOnlyDruidRace(2));
+    assert(TestObjectMgr.profiles.size() == profilesCount);
+    assert(TestObjectMgr.creatures[900100].Name == "Existing NPC");
+    assert(!TestDb.queries && !TestDb.executions);
+    TestObjectMgr.creatures.erase(900100);
+    TestDb.open = true;
     assert(HRRuntime::Prepare());
     assert(HRRuntime::Prepare()); // Initialization is idempotent.
     assert(!HRRuntime::IsEventOnlyDruidRace(1)); // Existing custom/native profiles remain available.
@@ -126,5 +161,6 @@ int main()
     assert(restored->position.x == 123.25f && restored->active);
     assert(HRRuntime::RemoveNpc(restored));
     assert(TestDb.rows.empty());
-    std::cout << "PASS: runtime profiles, map-local GUIDs, private NPC persistence/removal and failed-spawn rollback\n";
+    std::cout << "PASS: recovery profiles without DB/NPC, NPC collision isolation, map-local GUIDs, private NPC persistence/removal and failed-spawn rollback\n";
+#endif
 }

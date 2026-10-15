@@ -2,7 +2,7 @@
 
 Módulo de desarrollo para AzerothCore / WoW 3.3.5a. El evento usa **su propia base de datos** y crea sus tablas y pool desde C++. Por defecto reutiliza las credenciales que el core ya tiene configuradas, mediante una conexión independiente; no pide otra contraseña. No se importa ningún SQL en `world`, `characters` o `auth`.
 
-La versión **2.2.0-dev** incluye la configuración organizada en español, correcciones de persistencia, restauración de ambas especializaciones, selección de cartas y addon. Sigue pendiente validar el servidor completo y el cliente real antes de usarla en producción.
+La versión **2.2.1-dev** conserva las correcciones de persistencia, restauración y cartas, y corrige el arranque: un fallo del evento ya no detiene `worldserver` ni expulsa a personajes ajenos. Sigue pendiente validar esta revisión en el servidor completo y el cliente real antes de usarla en producción.
 
 ## Funcionamiento
 
@@ -22,7 +22,7 @@ El core necesita permitir el registro de datos de clase y plantillas NPC **en me
 
 Las dos variantes de `runtime-data` son alternativas: **no aplicar ambas**. Añaden dos métodos de registro a `ObjectMgr`, sin consultas SQL. Rechazan colisiones y no sustituyen datos existentes. El módulo genera en memoria las combinaciones raza/druida ausentes y su NPC; conserva los perfiles existentes.
 
-El parche `player-save-guard` se aplica además de la variante runtime elegida. Añade una marca temporal a Player para bloquear los guardados completo, de inventario y de oro después de un fallo; el siguiente inicio de sesión crea un Player nuevo sin esa marca. Esto evita que el cierre normal guarde oro actualizado junto a un inventario cuyo guardado se había revertido. No añade columnas ni SQL a las bases del core. El módulo rechaza el arranque si falta alguna de las extensiones.
+El parche `player-save-guard` se aplica además de la variante runtime elegida. Añade una marca temporal a Player para bloquear los guardados completo, de inventario y de oro después de un fallo; el siguiente inicio de sesión crea un Player nuevo sin esa marca. Esto evita que el cierre normal guarde oro actualizado junto a un inventario cuyo guardado se había revertido. No añade columnas ni SQL a las bases del core. Si falta alguna extensión, el evento permanece inactivo y `worldserver` continúa.
 
 El helper de instalación elige el parche que se pueda aplicar y reconoce una instalación ya preparada. Referencia adicional: AzerothCore `9eabf314a27b71d4e9cd513f6f2c08befe90d4ef`. Para otros commits hay que comprobar la compatibilidad. No se usan DBC ni MPQ personalizados.
 
@@ -74,7 +74,7 @@ El paquete contiene solo una lista fija de archivos C++ necesarios y el hash del
 
    Si una instalación anterior ya contiene una cadena en `DatabaseInfo`, vaciarla o quitar esa línea para activar la herencia. Una cadena explícita sigue siendo opcional para otro servidor/usuario: `host;puerto_o_socket;usuario;contraseña;base_privada[;ssl]`; en ese caso, la base de esa cadena tiene prioridad sobre `DatabaseName`. No subir configuraciones con contraseñas a GitHub.
 4. Reconfigurar, compilar e instalar `worldserver` con el módulo y reiniciarlo.
-5. Al arrancar `worldserver`, el módulo crea la base, diez tablas y la pool inicial de 474 IDs. **Compilar no instala las tablas.** Los siguientes arranques conservan las copias y los cambios de la pool; no la reemplazan.
+5. Al arrancar `worldserver` con el evento habilitado y sus parches disponibles, el módulo crea la base, diez tablas y la pool inicial de 474 IDs. **Compilar no instala las tablas.** Los siguientes arranques conservan las copias y los cambios de la pool; no la reemplazan.
 6. Como GM, ir al lugar elegido y ejecutar:
 
    ```text
@@ -108,11 +108,17 @@ Los guardados se hacen en dos pasos: primero se confirma el estado en la base pr
 
 No se presupone una transacción atómica entre dos bases o servidores distintos. Si una escritura privada o el guardado del personaje quedan sin confirmar, se detienen las acciones, se suspenden los guardados de esa sesión y se cierra para recuperar desde los datos durables al conectar. Un guardado del personaje pendiente se reconstruye con su proyección completa de hechizos, talentos, glifos y destrezas. También se conserva el nivel 80 cuando su restauración quedó pendiente. Los talentos permanecen bloqueados hasta confirmar la restauración del personaje.
 
-Si la base privada no se puede consultar, se rechaza temporalmente el inicio de sesión para no interpretar un fallo como ausencia de inscripción. Una conversión sin copia válida también se bloquea hasta recuperar la base correcta.
+Al inicializar se carga y valida un índice liviano de inscripciones. Los personajes ajenos y los participantes ya completados con su clase original entran sin consultar la base del evento. Si falla la base, solo se aísla una inscripción confirmada que todavía necesita recuperación o una conversión inequívoca; no se expulsa a todos los jugadores. Una conversión sin copia válida también se bloquea hasta recuperar la base correcta.
 
 Los guardados confirmados son síncronos desde el punto de vista del hilo de juego. Se debe medir la latencia con la carga esperada antes de abrir un evento concurrido.
 
-Desactivar `HabilidadesRandom.Enable` cierra la inscripción y restaura participantes cuando sea seguro. No retirar el módulo, su base ni el parche mientras queden participantes sin restaurar. Los desconectados se restauran al volver a entrar. No borrar las copias para permitir una nueva inscripción.
+### Arranque y desactivación
+
+Con `HabilidadesRandom.Enable = 0` desde el arranque no se abre la base privada ni se preparan o colocan NPC. Si están los parches, solo se registran los perfiles de raza/druida en memoria para que los personajes convertidos sigan siendo reconocibles por el core. Si faltan los parches o falla la base, el evento queda inactivo y el servidor continúa; se registra el motivo.
+
+Cambiar a cero mediante una recarga de configuración cuando el evento ya estaba funcionando conserva la conexión y el índice existentes: se cierran inscripciones y se restauran participantes cuando sea seguro. Si falla el NPC pero la base y los perfiles están disponibles, también se conserva la recuperación. Activar tras un arranque deshabilitado, o después de corregir un fallo de inicialización, requiere reiniciar `worldserver`; no se inyectan perfiles ni NPC en caliente.
+
+Sin abrir la base no se pueden reconocer todas las partidas pendientes: una conversión a druida de una raza normalmente druida no se distingue de un druida normal. Por eso, restaurar los participantes con el evento todavía operativo antes de apagarlo desde el arranque. No retirar el módulo, su base ni el parche mientras queden participantes sin restaurar, ni borrar copias para permitir otra inscripción.
 
 ## Si ya instalaste la versión anterior
 
@@ -147,6 +153,7 @@ luac5.1 -p client/addon/HabilidadesRandom/SpellChoice.lua
 lua5.1 tests/test_addon.lua
 python -m unittest discover -s tests -p 'test_*core*.py'
 python tests/test_recovery_save.py
+python tests/test_startup_lifecycle.py
 python3 tests/test_sql.py --socket /ruta/al/socket-de-pruebas
 ```
 
