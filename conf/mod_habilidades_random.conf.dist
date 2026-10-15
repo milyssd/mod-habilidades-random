@@ -1,0 +1,22 @@
+[worldserver]
+# Entry is opt-in through npc_habilidades_random_event, never automatic.
+# Disabling closes enrollment; current participants are restored on their next login/check/level change.
+HabilidadesRandom.Enable = 1
+HabilidadesRandom.InitialDrafts = 1
+HabilidadesRandom.DraftsPerLevel = 1
+HabilidadesRandom.InitialRerolls = 5
+HabilidadesRandom.RerollsPerLevel = 2
+HabilidadesRandom.InitialBans = 5
+HabilidadesRandom.PoolAmount = 45
+HabilidadesRandom.IncludeRarity5 = 0
+# Only applies to active participants. Restoration bypasses this guard.
+HabilidadesRandom.BlockTrainerSpells = 1
+HabilidadesRandom.Distribution.Common = 0.50
+HabilidadesRandom.Distribution.Uncommon = 0.27
+HabilidadesRandom.Distribution.Rare = 0.14
+HabilidadesRandom.Distribution.Epic = 0.06
+HabilidadesRandom.Distribution.Legendary = 0.03
+HabilidadesRandom.Distribution.Broken = 0.01
+# Talents are always locked during the event and unlocked at 80.
+# The old DisableTalents/KeepHybridResources/ResetOnLevelDecrease settings are no longer used.
+# Rage and energy use normal regeneration/consumption, without infinite refills.

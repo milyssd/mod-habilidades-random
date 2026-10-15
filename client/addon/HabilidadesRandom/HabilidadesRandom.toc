@@ -1,0 +1,7 @@
+## Interface: 30300
+## Title: Habilidades Random
+## Notes: Desafío temporal hasta nivel 80 - Hollow
+## Author: Hollow / basado en Prestige & Draft Mode
+## Version: 2.0.0-dev
+SpellChoice.xml
+SpellChoice.lua

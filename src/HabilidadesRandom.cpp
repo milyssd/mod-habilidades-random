@@ -1,0 +1,901 @@
+#include "HabilidadesRandom.h"
+#include "Chat.h"
+#include "Config.h"
+#include "DatabaseEnv.h"
+#include "DBCStores.h"
+#include "Log.h"
+#include "ObjectMgr.h"
+#include "Pet.h"
+#include "Player.h"
+#include "Random.h"
+#include "SpellMgr.h"
+#include "WorldPacket.h"
+#include "WorldSession.h"
+#include <algorithm>
+#include <charconv>
+#include <cmath>
+#include <sstream>
+
+namespace
+{
+uint32 Guid(Player const* player) { return player->GetGUID().GetCounter(); }
+void Notice(Player* player, char const* message)
+{
+    ChatHandler(player->GetSession()).SendSysMessage(message);
+}
+std::string Choices(HRStats const& stats)
+{
+    return std::to_string(stats.offered[0]) + "," + std::to_string(stats.offered[1]) + "," +
+        std::to_string(stats.offered[2]);
+}
+}
+
+HabilidadesRandomMgr* HabilidadesRandomMgr::instance()
+{
+    static HabilidadesRandomMgr manager;
+    return &manager;
+}
+
+HabilidadesRandomMgr::HabilidadesRandomMgr()
+{
+    // Riding and professions must never be suspended or claimed by the challenge.
+    uint32 ids[] = {54197,33388,33391,34090,34091,2259,3101,3464,11611,28596,51304,2366,2368,3570,
+        11993,28695,50300,2383,32605,7411,7412,7413,13920,28029,51313,13262,2018,3100,3538,9785,
+        29844,51300,45357,45358,45359,45360,45361,45363,55005,4036,4037,4038,12656,30350,49383,
+        51306,8163,8167,8168,10768,13697,32678,50305,52158,3908,3909,3910,12180,26790,51309,
+        2108,3104,3811,10662,32549,51302,25229,25230,28894,28895,28897,51311,2550,3102,3413,
+        18260,33359,51296,818,3273,3274,7924,10846,27028,45544,7620,7732,7731,18248,33095,51294,7738};
+    _protected.insert(std::begin(ids), std::end(ids));
+}
+
+void HabilidadesRandomMgr::LoadConfig()
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    _enabled = sConfigMgr->GetOption<bool>("HabilidadesRandom.Enable", true);
+    _initialDrafts = std::min(sConfigMgr->GetOption<uint32>("HabilidadesRandom.InitialDrafts", 1), 100u);
+    _draftsPerLevel = std::min(sConfigMgr->GetOption<uint32>("HabilidadesRandom.DraftsPerLevel", 1), 10u);
+    _initialRerolls = std::min(sConfigMgr->GetOption<uint32>("HabilidadesRandom.InitialRerolls", 5), 10000u);
+    _rerollsPerLevel = std::min(sConfigMgr->GetOption<uint32>("HabilidadesRandom.RerollsPerLevel", 2), 100u);
+    _initialBans = std::min(sConfigMgr->GetOption<uint32>("HabilidadesRandom.InitialBans", 5), 10000u);
+    _poolAmount = std::clamp(sConfigMgr->GetOption<uint32>("HabilidadesRandom.PoolAmount", 45), 3u, 10000u);
+    _includeBroken = sConfigMgr->GetOption<bool>("HabilidadesRandom.IncludeRarity5", false);
+    _blockTrainerSpells = sConfigMgr->GetOption<bool>("HabilidadesRandom.BlockTrainerSpells", true);
+    char const* names[] = {"Common", "Uncommon", "Rare", "Epic", "Legendary", "Broken"};
+    float defaults[] = {.50f, .27f, .14f, .06f, .03f, .01f};
+    for (uint8 i = 0; i < 6; ++i)
+    {
+        float value = sConfigMgr->GetOption<float>(std::string("HabilidadesRandom.Distribution.") + names[i], defaults[i]);
+        _distribution[i] = std::isfinite(value) ? std::clamp(value, 0.0f, 1.0f) : defaults[i];
+    }
+}
+
+void HabilidadesRandomMgr::Initialize()
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    LoadConfig();
+    _ready = false;
+    _rarities.clear();
+    // A failed/empty pool must never cause a destructive spell cleanup.
+    QueryResult schema = CharacterDatabase.Query("SELECT COUNT(*) FROM information_schema.tables WHERE "
+        "table_schema=DATABASE() AND table_name IN ('mod_habilidades_random_stats',"
+        "'mod_habilidades_random_bans','mod_habilidades_random_drafted_spells',"
+        "'mod_habilidades_random_spell_rarity','mod_habilidades_random_event','mod_habilidades_random_snapshot')");
+    if (!schema || schema->Fetch()[0].Get<uint32>() != 6)
+    {
+        LOG_ERROR("server.loading", "HabilidadesRandom: falta el esquema de evento; no se modificarán personajes.");
+        return;
+    }
+    QueryResult result = CharacterDatabase.Query("SELECT spell_id,rarity FROM mod_habilidades_random_spell_rarity");
+    if (!result)
+    {
+        LOG_ERROR("server.loading", "HabilidadesRandom: pool vacía o inaccesible; las inscripciones quedan cerradas.");
+        return;
+    }
+    do
+    {
+        Field* fields = result->Fetch();
+        uint32 root = Root(fields[0].Get<uint32>());
+        uint8 rarity = fields[1].Get<uint8>();
+        if (!sSpellMgr->GetSpellInfo(root) || rarity > HR_BROKEN || IsProtected(root))
+            continue;
+        auto itr = _rarities.find(root);
+        if (itr == _rarities.end() || rarity > itr->second)
+            _rarities[root] = rarity;
+    } while (result->NextRow());
+    _ready = !_rarities.empty();
+    LOG_INFO("server.loading", "HabilidadesRandom: {} cadenas válidas; evento por inscripción en NPC.", _rarities.size());
+}
+
+uint32 HabilidadesRandomMgr::Root(uint32 id) const
+{
+    uint32 root = sSpellMgr->GetFirstSpellInChain(id);
+    return root ? root : id;
+}
+
+bool HabilidadesRandomMgr::IsProtected(uint32 id) const
+{
+    return _protected.count(id) || _protected.count(Root(id));
+}
+
+bool HabilidadesRandomMgr::ShouldSuspend(uint32 id) const
+{
+    SpellInfo const* spell = sSpellMgr->GetSpellInfo(id);
+    return spell && !IsProtected(id) && spell->SpellFamilyName != SPELLFAMILY_GENERIC;
+}
+
+bool HabilidadesRandomMgr::IsParticipant(Player const* player) const
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    auto itr = _players.find(Guid(player));
+    return itr != _players.end() && !itr->second.completed;
+}
+
+bool HabilidadesRandomMgr::TalentsLocked(Player const* player) const
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    auto itr = _players.find(Guid(player));
+    return itr != _players.end() && HRTalentsLocked(true, itr->second.completed, itr->second.transitioning);
+}
+
+bool HabilidadesRandomMgr::HasHybridPower(Player const* player, uint8 power) const
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    return IsParticipant(player) && (power == POWER_MANA || power == POWER_RAGE || power == POWER_ENERGY);
+}
+
+bool HabilidadesRandomMgr::CanLearnSpell(Player const* player, uint32 id) const
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    auto itr = _players.find(Guid(player));
+    return itr == _players.end() || itr->second.completed || itr->second.transitioning ||
+        !_blockTrainerSpells || !ShouldSuspend(id);
+}
+
+bool HabilidadesRandomMgr::LoadPlayer(Player* player)
+{
+    uint32 guid = Guid(player);
+    auto event = CharacterDatabase.Query("SELECT completed,original_class,original_spec,original_specs,"
+        "spell_count,talent_count,revision,glyph_count FROM mod_habilidades_random_event WHERE player_id=" + std::to_string(guid));
+    if (!event)
+        return false;
+    HRPlayerState state;
+    Field* f = event->Fetch();
+    state.completed = f[0].Get<bool>();
+    state.runesInitialized = player->getClass() == CLASS_DEATH_KNIGHT;
+    state.originalClass = f[1].Get<uint8>();
+    state.originalSpec = f[2].Get<uint8>();
+    state.originalSpecs = f[3].Get<uint8>();
+    uint32 spells = f[4].Get<uint32>(), talents = f[5].Get<uint32>();
+    state.revision = f[6].Get<uint64>();
+    uint32 glyphCount = f[7].Get<uint32>();
+    uint32 loadedGlyphs = 0;
+    auto snapshot = CharacterDatabase.Query("SELECT spell_id,spec_mask,kind FROM mod_habilidades_random_snapshot "
+        "WHERE player_id=" + std::to_string(guid));
+    if (snapshot)
+        do
+        {
+            Field* row = snapshot->Fetch();
+            HRSavedSpell saved{row[0].Get<uint32>(), row[1].Get<uint8>()};
+            uint8 kind = row[2].Get<uint8>();
+            if (kind < 2)
+                (kind == 0 ? state.spells : state.talents).push_back(saved);
+            else if (kind < 8)
+            {
+                for (uint8 spec = 0; spec < 2; ++spec)
+                    if (saved.specMask & (1u << spec))
+                        state.glyphs[spec][kind - 2] = saved.id;
+                ++loadedGlyphs;
+            }
+        } while (snapshot->NextRow());
+    if (state.spells.size() != spells || state.talents.size() != talents || loadedGlyphs != glyphCount ||
+        !sObjectMgr->GetPlayerInfo(player->getRace(), state.originalClass) ||
+        state.originalSpecs < 1 || state.originalSpecs > MAX_TALENT_SPECS || state.originalSpec >= state.originalSpecs)
+    {
+        Notice(player, "[Desafío] Copia de seguridad incompleta. Contacta con un administrador; no se retirarán poderes.");
+        return false;
+    }
+    auto stats = CharacterDatabase.Query("SELECT successful_drafts,total_expected_drafts,rerolls,bans,"
+        "offered_spell_1,offered_spell_2,offered_spell_3,last_level FROM mod_habilidades_random_stats WHERE player_id=" +
+        std::to_string(guid));
+    if (!stats)
+        return false;
+    f = stats->Fetch();
+    state.stats.playerId = guid;
+    state.stats.successful = f[0].Get<uint32>();
+    state.stats.expected = f[1].Get<uint32>();
+    state.stats.rerolls = f[2].Get<uint32>();
+    state.stats.bans = f[3].Get<uint32>();
+    for (uint8 i = 0; i < 3; ++i)
+        state.stats.offered[i] = f[4 + i].Get<uint32>();
+    state.stats.lastLevel = f[7].Get<uint8>();
+    // COUNT distinguishes an empty set from a failed SELECT.
+    for (bool bans : {false, true})
+    {
+        std::string table = bans ? "mod_habilidades_random_bans" : "mod_habilidades_random_drafted_spells";
+        std::string column = bans ? "player_id" : "player_guid";
+        auto count = CharacterDatabase.Query("SELECT COUNT(*) FROM " + table + " WHERE " + column + "=" + std::to_string(guid));
+        if (!count)
+            return false;
+        uint32 expected = count->Fetch()[0].Get<uint32>();
+        auto rows = CharacterDatabase.Query("SELECT spell_id FROM " + table + " WHERE " + column + "=" + std::to_string(guid));
+        auto& values = bans ? state.bans : state.drafted;
+        if (rows)
+            do { values.insert(rows->Fetch()[0].Get<uint32>()); } while (rows->NextRow());
+        if (values.size() != expected)
+            return false;
+    }
+    _players[guid] = std::move(state);
+    return true;
+}
+
+bool HabilidadesRandomMgr::Save(Player* player, HRPlayerState& state, bool savePlayer)
+{
+    auto transaction = CharacterDatabase.BeginTransaction();
+    std::string guid = std::to_string(Guid(player));
+    HRStats const& s = state.stats;
+    std::ostringstream sql;
+    sql << "INSERT INTO mod_habilidades_random_stats VALUES (" << guid << ',' << s.successful << ',' << s.expected
+        << ',' << s.rerolls << ',' << s.bans << ',' << s.offered[0] << ',' << s.offered[1] << ',' << s.offered[2]
+        << ',' << uint32(s.lastLevel) << ") ON DUPLICATE KEY UPDATE successful_drafts=VALUES(successful_drafts),"
+        "total_expected_drafts=VALUES(total_expected_drafts),rerolls=VALUES(rerolls),bans=VALUES(bans),"
+        "offered_spell_1=VALUES(offered_spell_1),offered_spell_2=VALUES(offered_spell_2),"
+        "offered_spell_3=VALUES(offered_spell_3),last_level=VALUES(last_level)";
+    transaction->Append(sql.str());
+    transaction->Append("DELETE FROM mod_habilidades_random_drafted_spells WHERE player_guid=" + guid);
+    for (uint32 id : state.drafted)
+        transaction->Append("INSERT INTO mod_habilidades_random_drafted_spells VALUES (" + guid + ',' + std::to_string(id) + ')');
+    transaction->Append("DELETE FROM mod_habilidades_random_bans WHERE player_id=" + guid);
+    for (uint32 id : state.bans)
+        transaction->Append("INSERT INTO mod_habilidades_random_bans VALUES (" + guid + ',' + std::to_string(id) + ')');
+    if (savePlayer)
+    {
+        player->SaveToDB(transaction, false, false);
+        // Reconcile complete spell/talent membership even after a failed earlier save.
+        // Core SaveToDB clears dirty flags while constructing its transaction.
+        transaction->Append("DELETE FROM character_spell WHERE guid=" + guid);
+        for (auto const& pair : player->GetSpellMap())
+            if (pair.second->State != PLAYERSPELL_REMOVED && pair.second->State != PLAYERSPELL_TEMPORARY)
+                transaction->Append("INSERT INTO character_spell (guid,spell,specMask) VALUES (" + guid + ',' +
+                    std::to_string(pair.first) + ',' + std::to_string(pair.second->specMask) + ')');
+        transaction->Append("DELETE FROM character_talent WHERE guid=" + guid);
+        for (auto const& pair : player->GetTalentMap())
+            if (pair.second->State != PLAYERSPELL_REMOVED && pair.second->State != PLAYERSPELL_TEMPORARY)
+                transaction->Append("INSERT INTO character_talent (guid,spell,specMask) VALUES (" + guid + ',' +
+                    std::to_string(pair.first) + ',' + std::to_string(pair.second->specMask) + ')');
+    }
+    uint64 revision = state.revision + 1;
+    transaction->Append("UPDATE mod_habilidades_random_event SET completed=" + std::to_string(state.completed) +
+        ",revision=" + std::to_string(revision) + " WHERE player_id=" + guid);
+    // SaveToDB uses ASYNC-only prepared statements: commit on a worker, then wait for
+    // its actual result before publishing balances. Never run them on a sync connection.
+    bool committed = CharacterDatabase.AsyncCommitTransaction(transaction).m_future.get();
+    if (!committed)
+    {
+        Notice(player, "[Desafío] No se pudo guardar el cambio. La copia original sigue conservada; contacta con un administrador.");
+        return false;
+    }
+    state.revision = revision;
+    return true;
+}
+
+void HabilidadesRandomMgr::ChangeClass(Player* player, uint8 classId)
+{
+    player->RemoveAurasByType(SPELL_AURA_MOD_SHAPESHIFT);
+    player->RemoveAurasByType(SPELL_AURA_MOUNTED);
+    // Only the class byte changes: race, gender and display IDs are untouched.
+    player->SetByteValue(UNIT_FIELD_BYTES_0, 1, classId);
+    player->setPowerType(classId == CLASS_WARRIOR ? POWER_RAGE :
+        classId == CLASS_ROGUE ? POWER_ENERGY : classId == CLASS_DEATH_KNIGHT ? POWER_RUNIC_POWER : POWER_MANA);
+    auto& state = _players.at(Guid(player));
+    if (classId == CLASS_DEATH_KNIGHT && !state.runesInitialized)
+    {
+        player->InitRunes();
+        state.runesInitialized = true;
+    }
+    player->InitStatsForLevel(true);
+    player->UpdateAllStats();
+    player->SetFullHealth();
+    player->SetPower(POWER_MANA, player->GetMaxPower(POWER_MANA));
+}
+
+bool HabilidadesRandomMgr::Join(Player* player)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!IsEnabled() || player->GetLevel() >= 80 || !player->IsAlive() || player->IsInCombat() ||
+        player->IsBeingTeleported() || player->IsMounted())
+    {
+        Notice(player, "[Desafío] Debes estar vivo, fuera de combate, sin montura y por debajo del nivel 80.");
+        return false;
+    }
+    if (!sObjectMgr->GetPlayerInfo(player->getRace(), CLASS_DRUID))
+    {
+        Notice(player, "[Desafío] Falta instalar el SQL de mundo para druida de tu raza y reiniciar el servidor.");
+        return false;
+    }
+    auto existing = CharacterDatabase.Query("SELECT COUNT(*) FROM mod_habilidades_random_event WHERE player_id=" + std::to_string(Guid(player)));
+    auto legacy = CharacterDatabase.Query("SELECT COUNT(*) FROM mod_habilidades_random_drafted_spells WHERE player_guid=" + std::to_string(Guid(player)));
+    if (!existing || !legacy || existing->Fetch()[0].Get<uint32>() || legacy->Fetch()[0].Get<uint32>())
+    {
+        Notice(player, "[Desafío] Ya existe un evento o registro antiguo para este personaje. No se sobrescribirá su copia.");
+        return false;
+    }
+    HRPlayerState state;
+    state.originalClass = player->getClass();
+    state.originalSpec = player->GetActiveSpec();
+    state.originalSpecs = player->GetSpecsCount();
+    state.stats.playerId = Guid(player);
+    state.stats.expected = _initialDrafts;
+    state.stats.rerolls = _initialRerolls;
+    state.stats.bans = _initialBans;
+    state.stats.lastLevel = player->GetLevel();
+    for (auto const& pair : player->GetSpellMap())
+        if (pair.second->State != PLAYERSPELL_REMOVED && pair.second->State != PLAYERSPELL_TEMPORARY)
+            state.spells.push_back({pair.first, pair.second->specMask});
+    for (auto const& pair : player->GetTalentMap())
+        if (pair.second->State != PLAYERSPELL_REMOVED && pair.second->State != PLAYERSPELL_TEMPORARY)
+            state.talents.push_back({pair.first, pair.second->specMask});
+    uint32 glyphCount = 0;
+    for (uint8 spec = 0; spec < state.originalSpecs; ++spec)
+    {
+        player->SetActiveSpec(spec);
+        for (uint8 slot = 0; slot < 6; ++slot)
+            state.glyphs[spec][slot] = player->GetGlyph(slot);
+    }
+    player->SetActiveSpec(state.originalSpec);
+    for (uint8 slot = 0; slot < 6; ++slot)
+        glyphCount += (state.glyphs[0][slot] != 0) + (state.glyphs[1][slot] != 0 && state.glyphs[1][slot] != state.glyphs[0][slot]);
+    auto transaction = CharacterDatabase.BeginTransaction();
+    std::string guid = std::to_string(Guid(player));
+    transaction->Append("INSERT INTO mod_habilidades_random_event (player_id,original_class,original_spec,original_specs,"
+        "spell_count,talent_count,glyph_count) VALUES (" + guid + ',' + std::to_string(state.originalClass) + ',' +
+        std::to_string(state.originalSpec) + ',' + std::to_string(state.originalSpecs) + ',' +
+        std::to_string(state.spells.size()) + ',' + std::to_string(state.talents.size()) + ',' + std::to_string(glyphCount) + ')');
+    for (uint8 kind = 0; kind < 2; ++kind)
+        for (HRSavedSpell const& spell : kind == 0 ? state.spells : state.talents)
+            transaction->Append("INSERT INTO mod_habilidades_random_snapshot VALUES (" + guid + ',' +
+                std::to_string(spell.id) + ',' + std::to_string(spell.specMask) + ',' + std::to_string(kind) + ')');
+    for (uint8 slot = 0; slot < 6; ++slot)
+        for (uint8 spec = 0; spec < state.originalSpecs; ++spec)
+        {
+            uint32 id = state.glyphs[spec][slot];
+            if (id && !(spec == 1 && id == state.glyphs[0][slot]))
+            {
+                uint8 mask = (state.glyphs[0][slot] == id ? 1 : 0) | (state.glyphs[1][slot] == id ? 2 : 0);
+                transaction->Append("INSERT INTO mod_habilidades_random_snapshot VALUES (" + guid + ',' +
+                    std::to_string(id) + ',' + std::to_string(mask) + ',' + std::to_string(slot + 2) + ')');
+            }
+        }
+    // Persist stats in the same transaction as the immutable snapshot.
+    transaction->Append("INSERT INTO mod_habilidades_random_stats (player_id,total_expected_drafts,rerolls,bans,last_level) VALUES (" +
+        guid + ',' + std::to_string(state.stats.expected) + ',' + std::to_string(state.stats.rerolls) + ',' +
+        std::to_string(state.stats.bans) + ',' + std::to_string(state.stats.lastLevel) + ") ON DUPLICATE KEY UPDATE "
+        "successful_drafts=0,total_expected_drafts=VALUES(total_expected_drafts),rerolls=VALUES(rerolls),bans=VALUES(bans),"
+        "offered_spell_1=0,offered_spell_2=0,offered_spell_3=0,last_level=VALUES(last_level)");
+    if (!CharacterDatabase.AsyncCommitTransaction(transaction).m_future.get())
+    {
+        Notice(player, "[Desafío] No se pudo guardar la copia. Tu personaje no ha sido modificado.");
+        return false;
+    }
+    // Read back every backup before removing a single original spell.
+    if (!LoadPlayer(player))
+        return false;
+    Suspend(player);
+    auto& current = _players.at(Guid(player));
+    if (!Save(player, current, true))
+        return false;
+    Notice(player, "[Desafío] Inscrito: druida temporal sin cambiar tu raza. Talentos bloqueados hasta el nivel 80.");
+    Check(player);
+    return true;
+}
+
+void HabilidadesRandomMgr::SuspendTalents(Player* player)
+{
+    auto& state = _players.at(Guid(player));
+    bool transitioning = state.transitioning;
+    state.transitioning = true;
+    uint8 active = player->GetActiveSpec();
+    // Reset both specs, not just the currently selected one. Backup stays immutable.
+    for (uint8 spec = 0; spec < player->GetSpecsCount(); ++spec)
+    {
+        player->ActivateSpec(spec);
+        for (uint8 slot = 0; slot < MAX_GLYPH_SLOT_INDEX; ++slot)
+            if (GlyphPropertiesEntry const* glyph = sGlyphPropertiesStore.LookupEntry(player->GetGlyph(slot)))
+                player->RemoveAurasDueToSpell(glyph->SpellId);
+        player->resetTalents(true);
+    }
+    player->ActivateSpec(active);
+    // ActivateSpec reapplies glyph auras for the active spec.
+    for (uint8 slot = 0; slot < MAX_GLYPH_SLOT_INDEX; ++slot)
+        if (GlyphPropertiesEntry const* glyph = sGlyphPropertiesStore.LookupEntry(player->GetGlyph(slot)))
+            player->RemoveAurasDueToSpell(glyph->SpellId);
+    state.transitioning = transitioning;
+    player->SetFreeTalentPoints(0);
+    player->SendTalentsInfoData(false);
+}
+
+void HabilidadesRandomMgr::Suspend(Player* player)
+{
+    auto& state = _players.at(Guid(player));
+    state.transitioning = true;
+    SuspendTalents(player);
+    if (Pet* pet = player->GetPet())
+        player->RemovePet(pet, PET_SAVE_NOT_IN_SLOT, true);
+    std::vector<uint32> remove;
+    for (auto const& pair : player->GetSpellMap())
+        if (pair.second->State != PLAYERSPELL_REMOVED && ShouldSuspend(pair.first) && !state.drafted.count(pair.first))
+            remove.push_back(pair.first);
+    for (uint32 id : remove)
+        player->removeSpell(id, SPEC_MASK_ALL, false);
+    if (player->getClass() != CLASS_DRUID)
+        ChangeClass(player, CLASS_DRUID);
+    // Resource capacities, not an infinite refill on every server tick.
+    player->SetMaxPower(POWER_RAGE, 1000);
+    player->SetMaxPower(POWER_ENERGY, 100);
+    state.transitioning = false;
+    UpgradeDrafted(player);
+}
+
+bool HabilidadesRandomMgr::Restore(Player* player)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    auto itr = _players.find(Guid(player));
+    if (itr == _players.end() || itr->second.completed)
+        return false;
+    if (!player->IsAlive() || player->IsInCombat() || player->IsBeingTeleported())
+        return false; // Retried automatically after combat/resurrection/teleport.
+    auto& state = itr->second;
+    state.transitioning = true;
+    SuspendTalents(player);
+    // Also remove automatically loaded druid class spells that are not draft-owned.
+    std::vector<uint32> remove;
+    for (auto const& pair : player->GetSpellMap())
+        if (pair.second->State != PLAYERSPELL_REMOVED &&
+            (ShouldSuspend(pair.first) || state.drafted.count(pair.first)))
+            remove.push_back(pair.first);
+    for (uint32 id : remove)
+        player->removeSpell(id, SPEC_MASK_ALL, false);
+    if (player->getClass() != state.originalClass)
+        ChangeClass(player, state.originalClass);
+    player->SetSpecsCount(state.originalSpecs);
+    player->ActivateSpec(state.originalSpec);
+    bool ok = true;
+    for (HRSavedSpell const& spell : state.talents)
+    {
+        for (uint8 spec = 0; spec < state.originalSpecs; ++spec)
+            if ((spell.specMask & (1u << spec)) && !player->HasTalent(spell.id, spec))
+            {
+                player->addTalent(spell.id, 1u << spec, 0);
+                ok = ok && player->HasTalent(spell.id, spec);
+            }
+    }
+    for (HRSavedSpell const& spell : state.spells)
+    {
+        player->addSpell(spell.id, spell.specMask, true);
+        auto found = player->GetSpellMap().find(spell.id);
+        ok = ok && found != player->GetSpellMap().end() && found->second->State != PLAYERSPELL_REMOVED;
+    }
+    if (!ok)
+    {
+        Notice(player, "[Desafío] Restauración incompleta: se conserva la copia para reintentarlo al conectar.");
+        state.transitioning = false;
+        return false;
+    }
+    uint8 currentSpec = player->GetActiveSpec();
+    for (uint8 spec = 0; spec < state.originalSpecs; ++spec)
+    {
+        player->SetActiveSpec(spec);
+        for (uint8 slot = 0; slot < MAX_GLYPH_SLOT_INDEX; ++slot)
+            player->SetGlyph(slot, state.glyphs[spec][slot], true);
+    }
+    player->SetActiveSpec(currentSpec);
+    // Restore original glyph effects, which were suspended without changing the glyph records.
+    for (uint8 slot = 0; slot < MAX_GLYPH_SLOT_INDEX; ++slot)
+        if (GlyphPropertiesEntry const* glyph = sGlyphPropertiesStore.LookupEntry(player->GetGlyph(slot)))
+            player->CastSpell(player, glyph->SpellId, true);
+    state.completed = true;
+    player->InitTalentForLevel();
+    player->SendTalentsInfoData(false);
+    player->UpdateAllStats();
+    state.stats.offered = {};
+    if (!Save(player, state, true))
+    {
+        state.completed = false;
+        state.transitioning = false;
+        return false;
+    }
+    state.transitioning = false;
+    Close(player);
+    Notice(player, player->GetLevel() >= 80 ?
+        "[Desafío] Completado al nivel 80: clase, poderes y talentos originales restaurados. Ya puedes usar entrenadores." :
+        "[Desafío] Evento cerrado: clase, poderes y talentos originales restaurados.");
+    return true;
+}
+
+void HabilidadesRandomMgr::OnLogin(Player* player)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    // Recovery remains available even if new enrollment is disabled or the pool fails.
+    if (!LoadPlayer(player))
+        return;
+    auto& state = _players.at(Guid(player));
+    if (state.completed)
+    {
+        // Reconcile a stale queued core save that left the temporary class after completion.
+        if (player->getClass() != CLASS_DRUID || state.originalClass == CLASS_DRUID)
+            return;
+        state.completed = false;
+        Restore(player);
+        return;
+    }
+    if (HRShouldRestore(true, state.completed, player->GetLevel()) || !_enabled || !_ready)
+    {
+        Restore(player);
+        return;
+    }
+    Suspend(player);
+    // Recover levels gained between the last module commit and a disconnect.
+    if (player->GetLevel() > state.stats.lastLevel)
+        OnLevelChanged(player, state.stats.lastLevel);
+    else
+    {
+        Save(player, state, true);
+        Check(player);
+    }
+}
+
+void HabilidadesRandomMgr::Update(Player* player, uint32 diff)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    auto itr = _players.find(Guid(player));
+    if (itr == _players.end() || itr->second.completed || itr->second.transitioning)
+        return;
+    auto& timer = itr->second.updateTimer;
+    if (diff < timer)
+    {
+        timer -= diff;
+        return;
+    }
+    timer = 1000;
+    if (HRShouldRestore(true, itr->second.completed, player->GetLevel()) || !_enabled || !_ready)
+        Restore(player);
+}
+
+void HabilidadesRandomMgr::OnLogout(Player* player)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    _players.erase(Guid(player));
+}
+
+void HabilidadesRandomMgr::OnSpecChanged(Player* player)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    auto itr = _players.find(Guid(player));
+    if (itr == _players.end() || itr->second.completed || itr->second.transitioning)
+        return;
+    SuspendTalents(player);
+    UpgradeDrafted(player);
+}
+
+void HabilidadesRandomMgr::OnLevelChanged(Player* player, uint8 /*oldLevel*/)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    auto itr = _players.find(Guid(player));
+    if (itr == _players.end() || itr->second.completed)
+        return;
+    if (HRShouldRestore(true, itr->second.completed, player->GetLevel()) || !_enabled || !_ready)
+    {
+        Restore(player);
+        return;
+    }
+    auto next = itr->second;
+    if (player->GetLevel() > next.stats.lastLevel)
+    {
+        uint32 difference = player->GetLevel() - next.stats.lastLevel;
+        next.stats.expected += difference * _draftsPerLevel;
+        next.stats.rerolls += difference * _rerollsPerLevel;
+    }
+    // Keep a high-water mark: lowering/re-raising level cannot farm drafts or erase the backup.
+    next.stats.lastLevel = std::max(next.stats.lastLevel, player->GetLevel());
+    if (!Save(player, next))
+        return;
+    itr->second = std::move(next);
+    UpgradeDrafted(player);
+    Check(player);
+}
+
+bool HabilidadesRandomMgr::Eligible(uint32 id, Player const* player) const
+{
+    SpellInfo const* spell = sSpellMgr->GetSpellInfo(id);
+    if (!spell || spell->SpellLevel > player->GetLevel() || IsProtected(id))
+        return false;
+    // A druid has mana, rage and energy; it does not acquire a DK's rune system or pet focus.
+    return spell->PowerType == POWER_MANA || spell->PowerType == POWER_RAGE ||
+        spell->PowerType == POWER_ENERGY || spell->PowerType == POWER_HEALTH;
+}
+
+std::vector<uint32> HabilidadesRandomMgr::RandomSpells(Player* player, uint32 count,
+    std::unordered_set<uint32> const& exclude) const
+{
+    auto const& state = _players.at(Guid(player));
+    std::vector<uint32> categories[6];
+    for (auto const& pair : _rarities)
+    {
+        uint32 id = pair.first;
+        if ((!_includeBroken && pair.second == HR_BROKEN) || !Eligible(id, player) ||
+            state.bans.count(id) || state.drafted.count(id) || exclude.count(id) || player->HasSpell(id))
+            continue;
+        categories[pair.second].push_back(id);
+    }
+    std::vector<uint32> pool;
+    auto shuffle = [](std::vector<uint32>& values)
+    {
+        for (size_t i = values.size(); i > 1; --i)
+            std::swap(values[i - 1], values[urand(0, uint32(i - 1))]);
+    };
+    for (uint8 rarity = 0; rarity < 6; ++rarity)
+    {
+        shuffle(categories[rarity]);
+        uint32 amount = std::min<uint32>(categories[rarity].size(), uint32(_poolAmount * _distribution[rarity]));
+        pool.insert(pool.end(), categories[rarity].begin(), categories[rarity].begin() + amount);
+    }
+    if (pool.size() < count)
+    {
+        pool.clear();
+        for (auto const& category : categories)
+            pool.insert(pool.end(), category.begin(), category.end());
+    }
+    shuffle(pool);
+    if (pool.size() > count)
+        pool.resize(count);
+    return pool;
+}
+
+bool HabilidadesRandomMgr::ValidOffer(Player* player, HRPlayerState const& state) const
+{
+    std::unordered_set<uint32> seen;
+    for (uint32 id : state.stats.offered)
+        if (!id || !_rarities.count(id) || !Eligible(id, player) || state.bans.count(id) ||
+            state.drafted.count(id) || player->HasSpell(id) || !seen.insert(id).second)
+            return false;
+    return true;
+}
+
+bool HabilidadesRandomMgr::Generate(Player* player)
+{
+    auto next = _players.at(Guid(player));
+    if (!next.stats.Remaining())
+        return false;
+    auto choices = RandomSpells(player, 3, {});
+    if (choices.size() < 3)
+    {
+        Notice(player, "[Desafío] No hay tres poderes elegibles. Tus elecciones y saldos se conservan para niveles posteriores.");
+        return false;
+    }
+    std::copy(choices.begin(), choices.end(), next.stats.offered.begin());
+    if (!Save(player, next))
+        return false;
+    _players.at(Guid(player)) = std::move(next);
+    return true;
+}
+
+void HabilidadesRandomMgr::Send(Player* player, std::string const& prefix, std::string const& message) const
+{
+    WorldPacket packet;
+    ChatHandler::BuildChatPacket(packet, CHAT_MSG_WHISPER, LANG_ADDON, player, player, prefix + '\t' + message);
+    player->GetSession()->SendPacket(&packet);
+}
+
+void HabilidadesRandomMgr::Close(Player* player) const
+{
+    Send(player, "SpellChoiceStatus", "inactive");
+    Send(player, "SpellChoiceClose", "");
+    Send(player, "SpellChoiceDrafts", "0");
+}
+
+void HabilidadesRandomMgr::Check(Player* player)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (!IsParticipant(player) || player->GetLevel() >= 80 || !IsEnabled())
+    {
+        if (IsParticipant(player))
+            Restore(player);
+        Close(player);
+        return;
+    }
+    auto& state = _players.at(Guid(player));
+    Send(player, "SpellChoiceStatus", "active");
+    if (state.stats.Remaining() && !ValidOffer(player, state))
+        Generate(player);
+    Send(player, "SpellChoiceDrafts", std::to_string(state.stats.Remaining()));
+    Send(player, "SpellChoiceRerolls", std::to_string(state.stats.rerolls));
+    Send(player, "SpellChoiceBansLeft", std::to_string(state.stats.bans));
+    std::string bans;
+    for (uint32 id : state.bans)
+    {
+        if (!bans.empty())
+            bans += ',';
+        bans += std::to_string(id);
+    }
+    Send(player, "SpellChoiceBans", bans);
+    if (!state.stats.Remaining() || !ValidOffer(player, state))
+    {
+        Send(player, "SpellChoiceClose", "");
+        return;
+    }
+    Send(player, "SpellChoice", Choices(state.stats));
+    std::string rarities;
+    for (uint32 id : state.stats.offered)
+    {
+        if (!rarities.empty())
+            rarities += ',';
+        rarities += std::to_string(_rarities.at(id));
+    }
+    Send(player, "SpellChoiceRarities", rarities);
+}
+
+bool HabilidadesRandomMgr::Grant(Player* player, uint32 id, std::unordered_set<uint32>& added)
+{
+    // Track only actual additions, including triggered/auxiliary spells. Never claim a pre-existing rank.
+    std::unordered_set<uint32> before;
+    for (auto const& pair : player->GetSpellMap())
+        if (pair.second->State != PLAYERSPELL_REMOVED)
+            before.insert(pair.first);
+    auto& state = _players.at(Guid(player));
+    bool transitioning = state.transitioning;
+    state.transitioning = true;
+    player->learnSpell(id);
+    for (auto const& pair : player->GetSpellMap())
+        if (pair.second->State != PLAYERSPELL_REMOVED && !before.count(pair.first))
+            added.insert(pair.first);
+    state.transitioning = transitioning;
+    return player->HasSpell(id);
+}
+
+bool HabilidadesRandomMgr::UpgradeDrafted(Player* player)
+{
+    auto& state = _players.at(Guid(player));
+    if (!IsEnabled() || state.completed)
+        return false;
+    auto next = state;
+    std::unordered_set<uint32> roots;
+    for (uint32 id : state.drafted)
+        roots.insert(Root(id));
+    for (uint32 root : roots)
+        for (uint32 id = root; id; id = sSpellMgr->GetNextSpellInChain(id))
+        {
+            SpellInfo const* spell = sSpellMgr->GetSpellInfo(id);
+            if (spell && spell->SpellLevel <= player->GetLevel() && !player->HasSpell(id))
+                Grant(player, id, next.drafted);
+        }
+    if (next.drafted == state.drafted)
+        return true;
+    if (!Save(player, next, true))
+    {
+        for (uint32 learned : next.drafted)
+            if (!state.drafted.count(learned))
+                player->removeSpell(learned, SPEC_MASK_ALL, false);
+        return false;
+    }
+    state = std::move(next);
+    return true;
+}
+
+void HabilidadesRandomMgr::Select(Player* player, uint32 id)
+{
+    auto& state = _players.at(Guid(player));
+    if (!state.stats.CanSelect(id, state.bans.count(id)) || !ValidOffer(player, state))
+    {
+        Check(player);
+        return;
+    }
+    auto next = state;
+    if (!Grant(player, id, next.drafted))
+    {
+        for (uint32 learned : next.drafted)
+            if (!state.drafted.count(learned))
+                player->removeSpell(learned, SPEC_MASK_ALL, false);
+        Notice(player, "[Desafío] No se pudo aprender ese poder. No se consumió la elección.");
+        return;
+    }
+    if (id == 1515)
+        for (uint32 auxiliary : {883u,2641u,6991u,982u,136u})
+            Grant(player, auxiliary, next.drafted);
+    if (id == 47241)
+        for (uint32 auxiliary : {50581u,59671u,54785u,50589u})
+            Grant(player, auxiliary, next.drafted);
+    ++next.stats.successful;
+    next.stats.offered = {};
+    if (!Save(player, next, true))
+    {
+        for (uint32 learned : next.drafted)
+            if (!state.drafted.count(learned))
+                player->removeSpell(learned, SPEC_MASK_ALL, false);
+        return;
+    }
+    state = std::move(next);
+    UpgradeDrafted(player);
+    Send(player, "SpellChoiceClose", "");
+    Check(player);
+}
+
+void HabilidadesRandomMgr::Reroll(Player* player)
+{
+    auto next = _players.at(Guid(player));
+    std::unordered_set<uint32> old(next.stats.offered.begin(), next.stats.offered.end());
+    auto replacements = RandomSpells(player, 3, old);
+    if (!next.stats.CanReroll(replacements.size() == 3))
+    {
+        Send(player, "SpellChoiceRerollDenied", "0");
+        return;
+    }
+    --next.stats.rerolls;
+    std::copy(replacements.begin(), replacements.end(), next.stats.offered.begin());
+    if (Save(player, next))
+        _players.at(Guid(player)) = std::move(next);
+    Check(player);
+}
+
+void HabilidadesRandomMgr::Ban(Player* player, uint32 id)
+{
+    auto next = _players.at(Guid(player));
+    std::unordered_set<uint32> old(next.stats.offered.begin(), next.stats.offered.end());
+    auto replacements = RandomSpells(player, 1, old);
+    if (!next.stats.CanBan(id, next.bans.count(id), !replacements.empty()))
+    {
+        Send(player, "SpellChoiceBanDenied", "0");
+        return;
+    }
+    --next.stats.bans;
+    next.bans.insert(id);
+    std::replace(next.stats.offered.begin(), next.stats.offered.end(), id, replacements[0]);
+    if (Save(player, next))
+    {
+        _players.at(Guid(player)) = std::move(next);
+        Send(player, "SpellChoiceBanAccepted", std::to_string(id));
+    }
+    Check(player);
+}
+
+bool HabilidadesRandomMgr::HandleWhisper(Player* player, std::string const& message)
+{
+    std::lock_guard<std::recursive_mutex> lock(_mutex);
+    if (message == "SC_CHECK" || message == "DRAFT_READY")
+    {
+        if (IsParticipant(player))
+        {
+            auto& state = _players.at(Guid(player));
+            auto now = std::chrono::steady_clock::now();
+            if (now - state.lastRequest < std::chrono::milliseconds(300))
+                return true;
+            state.lastRequest = now;
+        }
+        Check(player);
+        return true;
+    }
+    if (!IsEnabled() || !IsParticipant(player) || player->GetLevel() >= 80)
+        return true;
+    auto& state = _players.at(Guid(player));
+    auto now = std::chrono::steady_clock::now();
+    if (now - state.lastRequest < std::chrono::milliseconds(300))
+        return true;
+    state.lastRequest = now;
+    if (message == "SC_REROLL")
+        Reroll(player);
+    else if (message == "SC_REPLACE_BANNED")
+        Check(player); // Server already replaced it atomically.
+    else
+    {
+        size_t offset = message.rfind("SC_BAN:", 0) == 0 ? 7 : message.rfind("SC:", 0) == 0 ? 3 : 0;
+        if (!offset)
+            return false;
+        uint32 id = 0;
+        auto parsed = std::from_chars(message.data() + offset, message.data() + message.size(), id);
+        if (parsed.ec != std::errc{} || parsed.ptr != message.data() + message.size() || !id)
+            return true;
+        if (offset == 7)
+            Ban(player, id);
+        else
+            Select(player, id);
+    }
+    return true;
+}
