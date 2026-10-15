@@ -1,9 +1,11 @@
 [worldserver]
-# REQUIRED private DB connection (never world/auth/characters). Fill credentials locally.
-# host;port_or_socket;username;password;private_database[;ssl]
-# On startup C++ creates this database/tables/pool. The account needs CREATE on this private DB.
-# Do not reuse a user that can modify core schemas.
-HabilidadesRandom.DatabaseInfo = "127.0.0.1;3306;hr_event;CHANGE_ME;mod_habilidades_random"
+# Automatically reuse the core's character DB credentials through a separate connection.
+# Only this private database receives the module's tables/pool. Use a different name per realm.
+# The MySQL account already used by the core needs CREATE on this private database.
+HabilidadesRandom.DatabaseName = "mod_habilidades_random"
+# Optional separate connection. Leave empty (or omit) to inherit credentials; no extra password needed.
+# If set: host;port_or_socket;username;password;private_database[;ssl] (overrides DatabaseName).
+HabilidadesRandom.DatabaseInfo = ""
 # Runtime-only NPC template. Do not use .npc add (that command writes to world).
 # Use .hr npc to place it, .hr removenpc to remove the selected event NPC.
 HabilidadesRandom.NpcEntry = 900100

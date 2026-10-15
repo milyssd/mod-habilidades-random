@@ -23,7 +23,8 @@ public:
     void OnBeforeWorldInitialized() override
     {
         // These world hooks are available on cores without module database lifecycle hooks.
-        if (!HRDatabaseStore.Open(sConfigMgr->GetOption<std::string>("HabilidadesRandom.DatabaseInfo", "")) ||
+        if (!HRDatabaseStore.Open(sConfigMgr->GetOption<std::string>("HabilidadesRandom.DatabaseInfo", ""),
+                sConfigMgr->GetOption<std::string>("HabilidadesRandom.DatabaseName", "mod_habilidades_random")) ||
             !HRRuntime::Prepare())
             World::StopNow(ERROR_EXIT_CODE);
     }

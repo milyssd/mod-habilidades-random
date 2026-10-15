@@ -1,6 +1,6 @@
 # Habilidades Random — evento hasta nivel 80 con base propia
 
-Módulo de desarrollo para AzerothCore / WoW 3.3.5a. El evento usa **su propia base de datos** y crea sus tablas y pool desde C++. No se importa ningún SQL en `world`, `characters` o `auth`.
+Módulo de desarrollo para AzerothCore / WoW 3.3.5a. El evento usa **su propia base de datos** y crea sus tablas y pool desde C++. Por defecto reutiliza las credenciales que el core ya tiene configuradas, mediante una conexión independiente; no pide otra contraseña. No se importa ningún SQL en `world`, `characters` o `auth`.
 
 ## Funcionamiento
 
@@ -58,13 +58,16 @@ El paquete contiene solo una lista fija de archivos C++ necesarios y el hash del
    ```
 
    Se comprueba la aplicación antes de modificar los dos archivos de `ObjectMgr`. Si la API ya está completa, no hace cambios. Si detecta una aplicación parcial o un core incompatible, se detiene sin forzar. Se puede añadir `--check` para revisar sin aplicar.
-3. Instalar la configuración del módulo y completar **localmente** `HabilidadesRandom.DatabaseInfo`:
+3. Instalar la configuración del módulo. La conexión es automática usando las credenciales de la base de personajes del core; basta dejar los valores predeterminados:
 
    ```ini
-   HabilidadesRandom.DatabaseInfo = "127.0.0.1;3306;hr_event;CONTRASEÑA_LOCAL;mod_habilidades_random"
+   HabilidadesRandom.DatabaseName = "mod_habilidades_random"
+   HabilidadesRandom.DatabaseInfo = ""
    ```
 
-   Formato del core: `host;puerto_o_socket;usuario;contraseña;base_privada[;ssl]`. Usar una base propia **por reino**. La cuenta MySQL debe existir y tener permisos para crear esa base y administrar únicamente sus tablas. No necesita permisos sobre las bases del core. No subir la configuración con contraseñas a GitHub.
+   No hace falta repetir usuario ni contraseña. La cuenta MySQL que ya usa el core debe tener permiso para crear esa base y administrar sus tablas. Se copia su configuración de conexión sin cambiar la conexión ni el nombre de la base de personajes. Usar una base propia **por reino**, cambiando `DatabaseName` si comparten servidor MySQL.
+
+   Si una instalación anterior ya contiene una cadena en `DatabaseInfo`, vaciarla o quitar esa línea para activar la herencia. Una cadena explícita sigue siendo opcional para otro servidor/usuario: `host;puerto_o_socket;usuario;contraseña;base_privada[;ssl]`; en ese caso, la base de esa cadena tiene prioridad sobre `DatabaseName`. No subir configuraciones con contraseñas a GitHub.
 4. Reconfigurar, compilar e instalar `worldserver` con el módulo y reiniciarlo.
 5. Al arrancar `worldserver`, el módulo crea la base, diez tablas y la pool inicial de 474 IDs. **Compilar no instala las tablas.** Los siguientes arranques conservan las copias y los cambios de la pool; no la reemplazan.
 6. Como GM, ir al lugar elegido y ejecutar:
@@ -115,6 +118,8 @@ g++ -std=c++17 -Wall -Wextra -Werror tests/test_draft_state.cpp -o /tmp/hr-state
 /tmp/hr-state-tests
 g++ -std=c++17 -Wall -Wextra -Werror tests/test_database_schema.cpp -o /tmp/hr-schema-tests
 /tmp/hr-schema-tests
+g++ -std=c++17 -Wall -Wextra -Werror tests/test_database_connection.cpp -o /tmp/hr-connection-tests
+/tmp/hr-connection-tests
 g++ -std=c++17 -Wall -Wextra -Werror tests/test_learn_spell_hooks.cpp -o /tmp/hr-hook-tests
 /tmp/hr-hook-tests
 luac5.1 -p client/addon/HabilidadesRandom/SpellChoice.lua

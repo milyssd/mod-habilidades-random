@@ -1,4 +1,5 @@
 #include "HRDatabase.h"
+#include "HRDatabaseConnection.h"
 #include "HRDatabaseSchema.h"
 #include "HRDatabasePolicy.h"
 #include "DatabaseEnv.h"
@@ -12,12 +13,23 @@ HRDatabase& HRDatabase::Instance()
     return database;
 }
 
-bool HRDatabase::Open(std::string const& connectionString)
+bool HRDatabase::Open(std::string const& connectionString, std::string const& databaseName)
 {
     std::lock_guard<std::recursive_mutex> lock(_mutex);
     if (_connection)
         return true;
-    _info = std::make_unique<MySQLConnectionInfo>(connectionString);
+    if (connectionString.empty())
+    {
+        // Reuse the core's authentication, but own a separate connection and schema.
+        _info = HRCopyPrivateDatabaseConnection(CharacterDatabase.GetConnectionInfo(), databaseName);
+        if (!_info)
+        {
+            LOG_ERROR("server.loading", "HabilidadesRandom: la conexión de personajes del core aún no está disponible.");
+            return false;
+        }
+    }
+    else
+        _info = std::make_unique<MySQLConnectionInfo>(connectionString);
     std::vector<std::string> coreDatabases;
     for (auto pool : {WorldDatabase.GetConnectionInfo(), CharacterDatabase.GetConnectionInfo(), LoginDatabase.GetConnectionInfo()})
         if (pool)
@@ -25,15 +37,20 @@ bool HRDatabase::Open(std::string const& connectionString)
     bool valid = HRValidPrivateDatabaseName(_info->database, coreDatabases);
     if (!valid || _info->host.empty() || _info->port_or_socket.empty() || _info->user.empty())
     {
-        LOG_ERROR("server.loading", "HabilidadesRandom: configurar una conexión a una base PROPIA, distinta de las bases del core.");
+        LOG_ERROR("server.loading", "HabilidadesRandom: conexión o nombre de base propia inválidos; debe ser distinta de las bases del core.");
         return false;
     }
     // Create only the explicitly configured private schema. Never use a core database for bootstrapping.
     auto bootstrapInfo = *_info;
     bootstrapInfo.database = "information_schema";
     HRConnection bootstrap(bootstrapInfo);
-    if (bootstrap.Open() || !bootstrap.Execute("CREATE DATABASE IF NOT EXISTS `" + _info->database + "` CHARACTER SET utf8mb4"))
+    if (bootstrap.Open())
         return false;
+    if (!bootstrap.Execute("CREATE DATABASE IF NOT EXISTS `" + _info->database + "` CHARACTER SET utf8mb4"))
+    {
+        LOG_ERROR("server.loading", "HabilidadesRandom: la cuenta MySQL utilizada necesita permiso CREATE sobre la base propia {}.", _info->database);
+        return false;
+    }
     _connection = std::make_unique<HRConnection>(*_info);
     if (_connection->Open() || !InitializeSchema())
     {

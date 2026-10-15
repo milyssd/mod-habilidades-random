@@ -9,16 +9,26 @@
 class HRConnection : public MySQLConnection
 {
 public:
-    explicit HRConnection(MySQLConnectionInfo& info) : MySQLConnection(info) { }
+    explicit HRConnection(MySQLConnectionInfo& info) : MySQLConnection(info), _info(info), _host(info.host) { }
+    uint32 Open() override
+    {
+        // The core normalizes "." to "localhost" when opening a Unix socket.
+        // Keep the original transport for every open, including reconnects.
+        _info.host = _host;
+        return MySQLConnection::Open();
+    }
 protected:
     void DoPrepareStatements() override { }
+private:
+    MySQLConnectionInfo& _info;
+    std::string const _host;
 };
 
 class HRDatabase
 {
 public:
     static HRDatabase& Instance();
-    bool Open(std::string const& connectionString);
+    bool Open(std::string const& connectionString, std::string const& databaseName = "mod_habilidades_random");
     void Close();
     void KeepAlive();
     QueryResult Query(std::string const& sql);

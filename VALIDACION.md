@@ -26,12 +26,16 @@ Comprobaciones realizadas:
 - Posiciones NPC: persistencia en la base privada y conservación al repetir el arranque.
 - Comprobación de aislamiento: no quedan importaciones SQL para bases del core ni llamadas raw Query/Execute a CharacterDatabase/WorldDatabase en el módulo. El guardado del personaje usa las API y sentencias preparadas existentes de AzerothCore.
 
+Conexión automática: si `DatabaseInfo` está vacío, se copia la configuración activa de `CharacterDatabase` y se cambia solamente la base de destino a `DatabaseName` (predeterminada: `mod_habilidades_random`). No se reconstruye ni registra una cadena con credenciales. La conexión del core y sus bases no se modifican. El modo explícito anterior sigue disponible como opción.
+
+El test C++ de conexión comprueba copia independiente, autenticación, SSL, contraseña vacía, puertos, named pipe y el socket Unix que el core normaliza al abrir. Pasó en la rama nativa y con `_WIN32` definido para comprobar esa selección condicional; esto último no es una compilación MSVC. La conexión propia conserva su host de transporte al reabrirse, sin modificar el pool del core.
+
 Cambios contrastados con el flujo real de Player en el fork: las destrezas se restauran después de reconstruir los hechizos, y `SendInitialSpells` sincroniza el libro al terminar. El cambio de clase actualiza también CharacterCache conservando hermandad, arena, correo y grupo. Estas rutas requieren comprobación final dentro del juego.
 
 Pendiente antes de producción:
 
 - Compilar y enlazar el servidor completo con MSVC y las dependencias exactas del destino. No se ejecutó Visual Studio en este entorno.
-- Probar apertura automática de la conexión y permisos con el usuario MySQL real del evento.
+- Probar apertura automática de la conexión y permisos con la cuenta MySQL real del core; debe poder crear y administrar la base del evento.
 - Probar en el juego `.hr npc`, interacción, persistencia del NPC tras reiniciar, conversión sin cambiar de raza y restauración de cada clase al 80, incluyendo destrezas tras reconectar y actualización del libro sin reconectar.
 - Interrumpir de verdad el proceso o una conexión entre el commit privado y el guardado del core; comprobar la reconciliación de personajes, talentos y glifos.
 - Validar poderes, requisitos de armas/formas/mascotas y rendimiento bajo carga.
